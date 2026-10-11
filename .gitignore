@@ -6,3 +6,6 @@ sdk/config.json
 node_modules/
 scratch/
 temp_template/
+
+dist_repo/
+arreglar-plugin-y-conectar-fuentes-a-kino.json
