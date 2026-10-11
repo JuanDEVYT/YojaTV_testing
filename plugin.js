@@ -321,6 +321,28 @@ registerSource({
     }
     return items;
   },
+  async home() {
+    const r = await fetchText('https://www.cinecalidad.am/');
+    if (!r.ok) return [];
+    const items = [];
+    const seen = new Set();
+    const re = /<article id="post-(\d+)"[^>]*>([\s\S]*?)(?=<article id="post-|<\/main>|<footer)/g;
+    let m;
+    while ((m = re.exec(r.text)) !== null) {
+      const block = m[2];
+      const hrefM = /href="(https:\/\/www\.cinecalidad\.am\/ver-(pelicula|serie)\/([^"\/]+)\/?)"/.exec(block);
+      if (!hrefM) continue;
+      const type = hrefM[2] === 'serie' ? 'series' : 'movie';
+      const slug = hrefM[3];
+      const id = sanitizeId(slug, 'cc');
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const titleM = /alt="([^"]+)"/.exec(block);
+      const imgM = /data-src="([^"]+)"/.exec(block) || /src="(https?:\/\/[^"]+)"/.exec(block);
+      items.push({ id, ref: 'cc:' + type + ':' + slug, title: cleanText(titleM ? titleM[1] : '') || slugToTitle(slug), kind: type, poster: imgM ? imgM[1] : null, badges: ['HD', 'LATINO'] });
+    }
+    return items;
+  },
   async episodes(path) {
     const [type, slug] = path.split(':');
     if (type !== 'series') return { episodes: [] };
@@ -377,6 +399,28 @@ registerSource({
       const imgM = /data-src="([^"]+)"|src="([^"]+)"/.exec(block);
       const poster = imgM ? (imgM[1] || imgM[2]) : null;
       items.push({ id, ref: 'hs:' + cat + ':' + slug, title: cleanText(m[3]) || slugToTitle(slug), kind: type, poster: poster || null });
+    }
+    return items;
+  },
+  async home() {
+    const r = await fetchText('https://www.hackstore.fo/');
+    if (!r.ok) return [];
+    const items = [];
+    const seen = new Set();
+    const re = /<a[^>]+href="https:\/\/www\.hackstore\.fo\/(peliculas|series|animes)\/([^"\/]+)\/"[^>]*title="([^"]+)"/g;
+    let m;
+    while ((m = re.exec(r.text)) !== null) {
+      const cat = m[1];
+      const slug = m[2];
+      const type = cat === 'series' ? 'series' : 'movie';
+      const id = sanitizeId(slug, 'hs');
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const block = r.text.slice(Math.max(0, m.index - 500), m.index + 500);
+      const imgM = /data-src="([^"]+)"|src="([^"]+)"/.exec(block);
+      const poster = imgM ? (imgM[1] || imgM[2]) : null;
+      const yearM = /\((\d{4})\)/.exec(m[3]);
+      items.push({ id, ref: 'hs:' + cat + ':' + slug, title: cleanText(m[3]) || slugToTitle(slug), kind: type, poster: poster || null, year: yearM ? yearM[1] : null, badges: ['ESTRENO'] });
     }
     return items;
   },
@@ -1357,6 +1401,18 @@ export async function home() {
   const sl = await safeHome(SOURCES.sl);
   if (sl.length) rows.push({ id: 'sl-estrenos', title: '🎬 SoloLatino · Estrenos', items: sl.slice(0, 30), genre: 'peliculas' });
 
+  const cc = await safeHome(SOURCES.cc);
+  if (cc.length) rows.push({ id: 'cc-peliculas', title: '🍿 CineCalidad · Películas', items: cc.slice(0, 30), genre: 'peliculas' });
+
+  const hs = await safeHome(SOURCES.hs);
+  if (hs.length) rows.push({ id: 'hs-estrenos', title: '⚡ HackStore · Cartelera', items: hs.slice(0, 30), genre: 'peliculas' });
+
+  const pgh = await safeHome(SOURCES.pgh);
+  if (pgh.length) rows.push({ id: 'pgh-cine', title: '🎥 PelisGratisHDs · Cine', items: pgh.slice(0, 30), genre: 'peliculas' });
+
+  const cv = await safeHome(SOURCES.cv);
+  if (cv.length) rows.push({ id: 'cv-series', title: '📺 CuevanaSerie · Series', items: cv.slice(0, 30), genre: 'series' });
+
   const av1 = await safeHome(SOURCES.av1);
   if (av1.length) rows.push({ id: 'av1-anime', title: '🔥 AnimeAV1 · Últimos', items: av1.slice(0, 30), genre: 'anime' });
 
@@ -1366,13 +1422,78 @@ export async function home() {
   const jk = await safeHome(SOURCES.jkanime);
   if (jk.length) rows.push({ id: 'jk-episodios', title: '🎯 JKAnime · Últimos episodios', items: jk.slice(0, 30), genre: 'anime' });
 
-  const pgh = await safeHome(SOURCES.pgh);
-  if (pgh.length) rows.push({ id: 'pgh-cine', title: '🎥 PelisGratisHDs · Cine', items: pgh.slice(0, 30), genre: 'peliculas' });
-
-  const cv = await safeHome(SOURCES.cv);
-  if (cv.length) rows.push({ id: 'cv-series', title: '📺 CuevanaSerie · Series', items: cv.slice(0, 30), genre: 'series' });
-
   return rows;
+}
+
+export async function section(tab) {
+  await kino.sleep(0);
+  const selectedTab = typeof tab === 'string' && tab ? tab : 'peliculas';
+
+  const tabs = [
+    { id: 'peliculas', label: 'Películas' },
+    { id: 'series', label: 'Series' },
+    { id: 'anime', label: 'Anime' }
+  ];
+
+  const hero = {
+    title: 'YojaTV Cine y Series',
+    text: 'El mejor catálogo en español latino: estrenos de cartelera, series completas y anime en emisión.',
+    image: 'https://image.tmdb.org/t/p/original/mKFLAevD84x6n6T91d1uD36gT6.jpg'
+  };
+
+  const rows = [];
+
+  if (selectedTab === 'peliculas') {
+    const sl = await safeHome(SOURCES.sl);
+    const moviesSl = sl.filter((x) => x.kind === 'movie');
+    if (moviesSl.length) rows.push({ id: 'sec-sl-movies', title: '🎬 SoloLatino · Películas', items: moviesSl.slice(0, 30), genre: 'peliculas' });
+
+    const cc = await safeHome(SOURCES.cc);
+    const moviesCc = cc.filter((x) => x.kind === 'movie');
+    if (moviesCc.length) rows.push({ id: 'sec-cc-movies', title: '🍿 CineCalidad · Novedades', items: moviesCc.slice(0, 30), genre: 'peliculas' });
+
+    const hs = await safeHome(SOURCES.hs);
+    const moviesHs = hs.filter((x) => x.kind === 'movie');
+    if (moviesHs.length) rows.push({ id: 'sec-hs-movies', title: '⚡ HackStore · Cartelera', items: moviesHs.slice(0, 30), genre: 'peliculas' });
+
+    const pgh = await safeHome(SOURCES.pgh);
+    const moviesPgh = pgh.filter((x) => x.kind === 'movie');
+    if (moviesPgh.length) rows.push({ id: 'sec-pgh-movies', title: '🎥 PelisGratisHDs · HD', items: moviesPgh.slice(0, 30), genre: 'peliculas' });
+  } else if (selectedTab === 'series') {
+    const cv = await safeHome(SOURCES.cv);
+    const seriesCv = cv.filter((x) => x.kind === 'series');
+    if (seriesCv.length) rows.push({ id: 'sec-cv-series', title: '📺 CuevanaSerie · Populares', items: seriesCv.slice(0, 30), genre: 'series' });
+
+    const sl = await safeHome(SOURCES.sl);
+    const seriesSl = sl.filter((x) => x.kind === 'series');
+    if (seriesSl.length) rows.push({ id: 'sec-sl-series', title: '🔥 SoloLatino · Temporadas', items: seriesSl.slice(0, 30), genre: 'series' });
+
+    const pgh = await safeHome(SOURCES.pgh);
+    const seriesPgh = pgh.filter((x) => x.kind === 'series');
+    if (seriesPgh.length) rows.push({ id: 'sec-pgh-series', title: '✨ PelisGratisHDs · Series', items: seriesPgh.slice(0, 30), genre: 'series' });
+  } else if (selectedTab === 'anime') {
+    const av1 = await safeHome(SOURCES.av1);
+    if (av1.length) rows.push({ id: 'sec-av1-anime', title: '🔥 AnimeAV1 · Últimos episodios', items: av1.slice(0, 30), genre: 'anime' });
+
+    const afv = await safeHome(SOURCES.afv);
+    if (afv.length) rows.push({ id: 'sec-afv-anime', title: '⭐ AnimeFLV · En emisión', items: afv.slice(0, 30), genre: 'anime' });
+
+    const jk = await safeHome(SOURCES.jkanime);
+    if (jk.length) rows.push({ id: 'sec-jk-anime', title: '🎯 JKAnime · Lo más visto', items: jk.slice(0, 30), genre: 'anime' });
+  }
+
+  return { tabs, tab: selectedTab, hero, rows };
+}
+
+export async function categories() {
+  await kino.sleep(0);
+  return [
+    { id: 'cat-peliculas', title: 'Películas de Estreno', ref: 'browse:movies', art: 'https://image.tmdb.org/t/p/w780/mKFLAevD84x6n6T91d1uD36gT6.jpg' },
+    { id: 'cat-series', title: 'Series de TV', ref: 'browse:series', art: 'https://image.tmdb.org/t/p/w780/9faGSFi5jam6pDWGNdcu8R8Gv5v.jpg' },
+    { id: 'cat-anime', title: 'Anime Japonés', ref: 'browse:anime', art: 'https://image.tmdb.org/t/p/w780/kXfqcdQKsToO0OUXHcrrNCHDBzO.jpg' },
+    { id: 'cat-accion', title: 'Acción y Aventura', ref: 'browse:action', art: 'https://image.tmdb.org/t/p/w780/mKFLAevD84x6n6T91d1uD36gT6.jpg' },
+    { id: 'cat-terror', title: 'Terror y Suspenso', ref: 'browse:horror', art: 'https://image.tmdb.org/t/p/w780/9faGSFi5jam6pDWGNdcu8R8Gv5v.jpg' }
+  ];
 }
 
 export async function browse(params) {
@@ -1381,6 +1502,34 @@ export async function browse(params) {
   if (typeof params === 'string') ref = params;
   else if (params && typeof params.cursor === 'string') ref = params.cursor;
   else if (params && params.ref) ref = params.ref;
+
+  if (ref.startsWith('browse:')) {
+    const topic = ref.slice(7);
+    if (topic === 'movies') {
+      const sl = await safeHome(SOURCES.sl);
+      const cc = await safeHome(SOURCES.cc);
+      const hs = await safeHome(SOURCES.hs);
+      const all = [...sl, ...cc, ...hs].filter((x) => x.kind === 'movie');
+      return { items: all.slice(0, 100), next: null };
+    }
+    if (topic === 'series') {
+      const cv = await safeHome(SOURCES.cv);
+      const sl = await safeHome(SOURCES.sl);
+      const pgh = await safeHome(SOURCES.pgh);
+      const all = [...cv, ...sl, ...pgh].filter((x) => x.kind === 'series');
+      return { items: all.slice(0, 100), next: null };
+    }
+    if (topic === 'anime') {
+      const av1 = await safeHome(SOURCES.av1);
+      const afv = await safeHome(SOURCES.afv);
+      const jk = await safeHome(SOURCES.jkanime);
+      const all = [...av1, ...afv, ...jk];
+      return { items: all.slice(0, 100), next: null };
+    }
+    const sl = await safeHome(SOURCES.sl);
+    const cc = await safeHome(SOURCES.cc);
+    return { items: [...sl, ...cc].slice(0, 100), next: null };
+  }
 
   const [srcId, ...rest] = ref.split(':');
   const src = SOURCES[srcId];

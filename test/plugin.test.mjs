@@ -20,6 +20,29 @@ test('manifest is apiVersion 6 with browser pages', () => {
   assert.equal(manifest.browser, 'pages');
   assert.ok(Array.isArray(manifest.hosts) && manifest.hosts.length > 20);
   assert.equal(manifest.streamHosts, 'any');
+  assert.ok(manifest.theme, 'manifest must declare theme');
+  assert.equal(manifest.theme.accent, '#FF6B00');
+  assert.ok(manifest.section, 'manifest must declare section');
+  assert.equal(manifest.section.label, 'YojaTV');
+  assert.deepEqual(manifest.categories, ['movies', 'series', 'anime']);
+});
+
+test('categories export returns categories array', async () => {
+  const cats = await plugin.categories();
+  assert.ok(Array.isArray(cats), 'categories must return an array');
+  assert.ok(cats.length >= 3, 'at least 3 categories');
+  for (const c of cats) {
+    assert.ok(c.id && c.title && c.ref);
+    assert.ok(c.ref.startsWith('browse:'));
+  }
+});
+
+test('section export returns tabs and rows', async () => {
+  const sec = await plugin.section('peliculas');
+  assert.ok(sec && typeof sec === 'object', 'section must return object');
+  assert.ok(Array.isArray(sec.tabs), 'section must have tabs');
+  assert.ok(Array.isArray(sec.rows), 'section must have rows');
+  assert.equal(sec.tab, 'peliculas');
 });
 
 test('home returns rows', { skip: !hasFixtures }, async () => {

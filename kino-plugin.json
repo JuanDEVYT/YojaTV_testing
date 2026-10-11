@@ -9,6 +9,16 @@
   "homepage": "https://github.com/YojaTV-kino/YojaTV_plugin",
   "browser": "pages",
   "streamHosts": "any",
+  "section": {
+    "label": "YojaTV"
+  },
+  "theme": {
+    "accent": "#FF6B00",
+    "onAccent": "#000000",
+    "background": "#0B0F19",
+    "surface": "#161D2F",
+    "highlight": "#F5F5F5"
+  },
   "categories": [
     "movies",
     "series",
@@ -114,6 +124,6 @@
   "icon": "icon.png",
   "signature": {
     "authorKey": "c3caf0f9e51197553082904a2655d51e5afcca579a3048cdfbd8a97f7b2cf2c3",
-    "value": "8699f067a8992473683bc439c2a9db0ed5c02e3275ff85cad3219109f5b063675e9f9b607117932db1def5bfa0f52d3c4664e9d1c4f9c684841d7631cb80e505"
+    "value": "b712d923d376b88d7822a3892d28e77229f836915a94db34d3942ad0cd3e62579c87725c99580cbd68c892e61a7004ccb84688a37528c2426aead9d004448405"
   }
 }
