@@ -59,12 +59,34 @@ function sanitizeId(raw, prefix) {
   return id.length > 128 ? id.slice(0, 128) : id;
 }
 
+/* ---------- logging & debug ---------- */
+
+function log(...args) {
+  try {
+    if (typeof kino !== 'undefined' && kino.log) {
+      kino.log('[YojaTV]', ...args);
+    }
+  } catch {}
+  try {
+    if (typeof console !== 'undefined' && console.log) {
+      console.log('[YojaTV]', ...args);
+    }
+  } catch {}
+}
+
 async function fetchText(url, headers) {
+  log(`[HTTP GET] -> ${url}`);
   try {
     const res = await kino.fetch(url, { headers: { ...HEADERS, ...(headers || {}) } });
-    if (!res.ok) return { ok: false, status: res.status, text: '' };
-    return { ok: true, status: res.status, text: getText(res), url: res.url };
+    if (!res.ok) {
+      log(`[HTTP GET FAIL] ${res.status} <- ${url}`);
+      return { ok: false, status: res.status, text: '' };
+    }
+    const txt = getText(res);
+    log(`[HTTP GET OK] ${res.status} (${txt.length} chars) <- ${url}`);
+    return { ok: true, status: res.status, text: txt, url: res.url };
   } catch (e) {
+    log(`[HTTP GET ERROR] ${e ? e.message : e} <- ${url}`);
     return { ok: false, status: 0, text: '', error: e };
   }
 }
@@ -72,31 +94,52 @@ async function fetchText(url, headers) {
 async function fetchJson(url, headers) {
   const r = await fetchText(url, { Accept: 'application/json', ...(headers || {}) });
   if (!r.ok) return null;
-  try { return JSON.parse(r.text); } catch { return null; }
+  try {
+    return JSON.parse(r.text);
+  } catch (e) {
+    log(`[JSON PARSE ERROR] <- ${url}`);
+    return null;
+  }
 }
 
 async function postForm(url, form, headers) {
+  log(`[HTTP POST FORM] -> ${url}`);
   try {
     const res = await kino.fetch(url, {
       method: 'POST',
       headers: { ...HEADERS, 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest', ...(headers || {}) },
       body: form
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      log(`[HTTP POST FAIL] ${res.status} <- ${url}`);
+      return null;
+    }
+    log(`[HTTP POST OK] ${res.status} <- ${url}`);
     return res;
-  } catch { return null; }
+  } catch (e) {
+    log(`[HTTP POST ERROR] ${e ? e.message : e} <- ${url}`);
+    return null;
+  }
 }
 
 async function postJson(url, obj, headers) {
+  log(`[HTTP POST JSON] -> ${url}`);
   try {
     const res = await kino.fetch(url, {
       method: 'POST',
       headers: { ...HEADERS, 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', Accept: 'application/json', ...(headers || {}) },
       body: JSON.stringify(obj)
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      log(`[HTTP POST JSON FAIL] ${res.status} <- ${url}`);
+      return null;
+    }
+    log(`[HTTP POST JSON OK] ${res.status} <- ${url}`);
     return res;
-  } catch { return null; }
+  } catch (e) {
+    log(`[HTTP POST JSON ERROR] ${e ? e.message : e} <- ${url}`);
+    return null;
+  }
 }
 
 /** kino.fetch, falling back to kino.browser.page when the plain fetch is blocked. */
@@ -1386,48 +1429,67 @@ export async function search(params) {
   if (typeof params === 'string') query = params.trim();
   else if (params && typeof params.q === 'string') query = params.q.trim();
   else if (params && typeof params.query === 'string') query = params.query.trim();
+  log(`[search] called with query: "${query}"`);
   if (!query) return [];
 
   const ids = Object.keys(SOURCES);
+  log(`[search] dispatching query across ${ids.length} sources`);
   const settled = await Promise.allSettled(ids.map((id) => safeSearch(SOURCES[id], query)));
-  const groups = settled.map((s) => (s.status === 'fulfilled' ? s.value : []));
-  return mergeAndRank(groups, query).slice(0, 100);
+  const groups = settled.map((s, idx) => {
+    const hits = s.status === 'fulfilled' ? s.value : [];
+    log(`[search] source ${ids[idx]}: ${hits.length} items`);
+    return hits;
+  });
+  const results = mergeAndRank(groups, query).slice(0, 100);
+  log(`[search] total ranked results: ${results.length}`);
+  return results;
 }
 
 export async function home() {
   await kino.sleep(0);
+  log('[home] loading curated rows');
   const rows = [];
 
   const sl = await safeHome(SOURCES.sl);
+  log(`[home] sl: ${sl.length} items`);
   if (sl.length) rows.push({ id: 'sl-estrenos', title: '🎬 SoloLatino · Estrenos', items: sl.slice(0, 30), genre: 'peliculas' });
 
   const cc = await safeHome(SOURCES.cc);
+  log(`[home] cc: ${cc.length} items`);
   if (cc.length) rows.push({ id: 'cc-peliculas', title: '🍿 CineCalidad · Películas', items: cc.slice(0, 30), genre: 'peliculas' });
 
   const hs = await safeHome(SOURCES.hs);
+  log(`[home] hs: ${hs.length} items`);
   if (hs.length) rows.push({ id: 'hs-estrenos', title: '⚡ HackStore · Cartelera', items: hs.slice(0, 30), genre: 'peliculas' });
 
   const pgh = await safeHome(SOURCES.pgh);
+  log(`[home] pgh: ${pgh.length} items`);
   if (pgh.length) rows.push({ id: 'pgh-cine', title: '🎥 PelisGratisHDs · Cine', items: pgh.slice(0, 30), genre: 'peliculas' });
 
   const cv = await safeHome(SOURCES.cv);
+  log(`[home] cv: ${cv.length} items`);
   if (cv.length) rows.push({ id: 'cv-series', title: '📺 CuevanaSerie · Series', items: cv.slice(0, 30), genre: 'series' });
 
   const av1 = await safeHome(SOURCES.av1);
+  log(`[home] av1: ${av1.length} items`);
   if (av1.length) rows.push({ id: 'av1-anime', title: '🔥 AnimeAV1 · Últimos', items: av1.slice(0, 30), genre: 'anime' });
 
   const afv = await safeHome(SOURCES.afv);
+  log(`[home] afv: ${afv.length} items`);
   if (afv.length) rows.push({ id: 'afv-anime', title: '⭐ AnimeFLV · Populares', items: afv.slice(0, 30), genre: 'anime' });
 
   const jk = await safeHome(SOURCES.jkanime);
+  log(`[home] jk: ${jk.length} items`);
   if (jk.length) rows.push({ id: 'jk-episodios', title: '🎯 JKAnime · Últimos episodios', items: jk.slice(0, 30), genre: 'anime' });
 
+  log(`[home] total rows: ${rows.length}`);
   return rows;
 }
 
 export async function section(tab) {
   await kino.sleep(0);
   const selectedTab = typeof tab === 'string' && tab ? tab : 'peliculas';
+  log(`[section] opening tab: ${selectedTab}`);
 
   const tabs = [
     { id: 'peliculas', label: 'Películas' },
@@ -1482,11 +1544,13 @@ export async function section(tab) {
     if (jk.length) rows.push({ id: 'sec-jk-anime', title: '🎯 JKAnime · Lo más visto', items: jk.slice(0, 30), genre: 'anime' });
   }
 
+  log(`[section] returned ${rows.length} rows for tab ${selectedTab}`);
   return { tabs, tab: selectedTab, hero, rows };
 }
 
 export async function categories() {
   await kino.sleep(0);
+  log('[categories] returning categories list');
   return [
     { id: 'cat-peliculas', title: 'Películas de Estreno', ref: 'browse:movies', art: 'https://image.tmdb.org/t/p/w780/mKFLAevD84x6n6T91d1uD36gT6.jpg' },
     { id: 'cat-series', title: 'Series de TV', ref: 'browse:series', art: 'https://image.tmdb.org/t/p/w780/9faGSFi5jam6pDWGNdcu8R8Gv5v.jpg' },
@@ -1503,13 +1567,17 @@ export async function browse(params) {
   else if (params && typeof params.cursor === 'string') ref = params.cursor;
   else if (params && params.ref) ref = params.ref;
 
+  log(`[browse] called with ref: "${ref}"`);
+
   if (ref.startsWith('browse:')) {
     const topic = ref.slice(7);
+    log(`[browse] browsing topic: "${topic}"`);
     if (topic === 'movies') {
       const sl = await safeHome(SOURCES.sl);
       const cc = await safeHome(SOURCES.cc);
       const hs = await safeHome(SOURCES.hs);
       const all = [...sl, ...cc, ...hs].filter((x) => x.kind === 'movie');
+      log(`[browse] movies topic: ${all.length} items`);
       return { items: all.slice(0, 100), next: null };
     }
     if (topic === 'series') {
@@ -1517,6 +1585,7 @@ export async function browse(params) {
       const sl = await safeHome(SOURCES.sl);
       const pgh = await safeHome(SOURCES.pgh);
       const all = [...cv, ...sl, ...pgh].filter((x) => x.kind === 'series');
+      log(`[browse] series topic: ${all.length} items`);
       return { items: all.slice(0, 100), next: null };
     }
     if (topic === 'anime') {
@@ -1524,6 +1593,7 @@ export async function browse(params) {
       const afv = await safeHome(SOURCES.afv);
       const jk = await safeHome(SOURCES.jkanime);
       const all = [...av1, ...afv, ...jk];
+      log(`[browse] anime topic: ${all.length} items`);
       return { items: all.slice(0, 100), next: null };
     }
     const sl = await safeHome(SOURCES.sl);
@@ -1533,10 +1603,14 @@ export async function browse(params) {
 
   const [srcId, ...rest] = ref.split(':');
   const src = SOURCES[srcId];
-  if (!src) return { items: [], next: null };
+  if (!src) {
+    log(`[browse] unknown source: ${srcId}`);
+    return { items: [], next: null };
+  }
 
   const path = rest.join(':');
   if (src.episodes) {
+    log(`[browse] loading episodes from ${srcId} path: ${path}`);
     const eps = await src.episodes(path);
     const items = (eps.episodes || []).map((e) => ({
       id: sanitizeId(srcId + '-' + e.season + '-' + e.number),
@@ -1544,6 +1618,7 @@ export async function browse(params) {
       title: e.title || ('T' + (e.season || 1) + 'E' + e.number),
       kind: 'series'
     }));
+    log(`[browse] ${items.length} episode items from ${srcId}`);
     return { items: items.slice(0, 100), next: null };
   }
   return { items: [], next: null };
@@ -1554,14 +1629,19 @@ export async function episodes(params) {
   let ref = '';
   if (typeof params === 'string') ref = params;
   else if (params && typeof params.ref === 'string') ref = params.ref;
+  log(`[episodes] called with ref: "${ref}"`);
   if (!ref) return { episodes: [] };
 
   const [srcId, ...rest] = ref.split(':');
   const src = SOURCES[srcId];
-  if (!src || !src.episodes) return { episodes: [] };
+  if (!src || !src.episodes) {
+    log(`[episodes] source ${srcId} not found or has no episodes`);
+    return { episodes: [] };
+  }
 
   const path = rest.join(':');
   const eps = await src.episodes(path);
+  log(`[episodes] ${srcId} returned ${(eps.episodes || []).length} episodes`);
   return { episodes: eps.episodes || [] };
 }
 
@@ -1570,15 +1650,30 @@ export async function resolve(params) {
   let ref = '';
   if (typeof params === 'string') ref = params;
   else if (params && typeof params.ref === 'string') ref = params.ref;
-  if (!ref) throw kino.error('not_found', 'Referencia no especificada');
+  log(`[resolve] resolving stream for ref: "${ref}"`);
+  if (!ref) {
+    log('[resolve ERROR] missing ref');
+    throw kino.error('not_found', 'Referencia no especificada');
+  }
 
   const [srcId, ...rest] = ref.split(':');
   const src = SOURCES[srcId];
-  if (!src) throw kino.error('not_found', 'Fuente desconocida');
-  if (!src.resolve) throw kino.error('unavailable', 'Esta fuente no soporta reproducción directa');
+  if (!src) {
+    log(`[resolve ERROR] unknown source: ${srcId}`);
+    throw kino.error('not_found', 'Fuente desconocida');
+  }
+  if (!src.resolve) {
+    log(`[resolve ERROR] source ${srcId} does not support playback`);
+    throw kino.error('unavailable', 'Esta fuente no soporta reproducción directa');
+  }
 
   const path = rest.join(':');
+  log(`[resolve] calling ${srcId}.resolve with path: "${path}"`);
   const stream = await src.resolve(path);
-  if (!stream || !stream.url) throw kino.error('unavailable', 'No se encontró un servidor de reproducción');
+  if (!stream || !stream.url) {
+    log(`[resolve ERROR] no stream returned from ${srcId}`);
+    throw kino.error('unavailable', 'No se encontró un servidor de reproducción');
+  }
+  log(`[resolve OK] stream resolved: ${stream.url}`);
   return stream;
 }
