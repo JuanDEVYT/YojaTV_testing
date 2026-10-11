@@ -171,6 +171,35 @@ function decodePgh(s) {
   return r.startsWith('http') ? r : null;
 }
 
+/** Pure JS unpacker for Dean Edwards p,a,c,k,e,d JavaScript */
+function unpackDeanEdwards(p, a, c, k) {
+  function e(c) {
+    return (c < a ? '' : e(parseInt(c / a))) + ((c = c % a) > 35 ? String.fromCharCode(c + 29) : c.toString(36));
+  }
+  while (c--) {
+    if (k[c]) {
+      p = p.replace(new RegExp('\\b' + e(c) + '\\b', 'g'), k[c]);
+    }
+  }
+  return p;
+}
+
+function extractPackedJs(html) {
+  if (!html) return '';
+  const m = /eval\(function\(p,a,c,k,e,[rd]\)\{.*?return p\}\s*\('(.*?)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'([^']*)'\.split\('\|'\)/s.exec(html);
+  if (!m) return '';
+  try {
+    const p = m[1].replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+    const a = parseInt(m[2], 10);
+    const c = parseInt(m[3], 10);
+    const k = m[4].split('|');
+    return unpackDeanEdwards(p, a, c, k);
+  } catch (err) {
+    log(`[unpack ERROR] ${err ? err.message : err}`);
+    return '';
+  }
+}
+
 /* ---------- source registry ---------- */
 // Each entry: { id, label, host, mode, search(q), home(), detail(ref), episodes(ref), resolve(ref) }
 // `ref` is the source-local path; the plugin's public ref is "<id>:<path>".
@@ -480,12 +509,13 @@ registerSource({
     const locM = /location\.href\s*=\s*['"]([^'"]+)['"]/i.exec(p.text);
     if (locM && locM[1]) {
       const target = locM[1];
-      if (target.includes('vimeos.net')) {
-        const v = await fetchText(target, { Referer: playUrl });
-        if (v.ok) {
-          const m3u = v.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-          if (m3u) return { url: m3u[1] };
-        }
+      const v = await fetchText(target, { Referer: playUrl });
+      if (v.ok) {
+        const unpacked = extractPackedJs(v.text);
+        const m3u = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
+        if (m3u) return { url: m3u[1] };
+        const mp4 = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
+        if (mp4) return { url: mp4[1] };
       }
       return { url: target };
     }
@@ -493,12 +523,16 @@ registerSource({
     if (iframeM) {
       const emb = await fetchText(iframeM[1], { Referer: playUrl });
       if (emb.ok) {
-        const m3u = emb.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
+        const unpacked = extractPackedJs(emb.text);
+        const m3u = (unpacked || emb.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
         if (m3u) return { url: m3u[1] };
+        const mp4 = (unpacked || emb.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
+        if (mp4) return { url: mp4[1] };
       }
       return { url: iframeM[1] };
     }
-    const m3u = p.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
+    const unpacked = extractPackedJs(p.text);
+    const m3u = (unpacked || p.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
     return m3u ? { url: m3u[1] } : null;
   }
 });
