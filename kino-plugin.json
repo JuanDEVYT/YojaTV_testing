@@ -1,7 +1,7 @@
 {
   "id": "yoja-tv-kino",
   "name": "YojaTV",
-  "version": "3.0.4",
+  "version": "3.0.5",
   "apiVersion": 6,
   "entry": "plugin.js",
   "description": "Plugin de YojaTV para Kino TV. Películas de cine en español latino, series y anime. Creado por JuandreXter, YojanderGaming y einer_bg.",
@@ -128,11 +128,35 @@
     "mega.nz",
     "bysekoze.com",
     "player.zilla-networks.com",
-    "flixcloud.cc"
+    "flixcloud.cc",
+    "boot.pluto.tv",
+    "embed.pelisgratishd.lat",
+    "*.pelisgratishd.lat",
+    "hakunaymatata.com",
+    "*.hakunaymatata.com",
+    "mfw09.org",
+    "*.mfw09.org",
+    "kaembed.net",
+    "*.kaembed.net",
+    "videasy.net",
+    "player.videasy.net",
+    "*.videasy.net",
+    "vidapi.xyz",
+    "*.vidapi.xyz",
+    "nontongo.stream",
+    "*.nontongo.stream",
+    "vidfast.vc",
+    "*.vidfast.vc",
+    "uqload.vc",
+    "*.uqload.vc",
+    "vidplayz.site",
+    "*.vidplayz.site",
+    "playmogo.com",
+    "*.playmogo.com"
   ],
   "icon": "icon.png",
   "signature": {
     "authorKey": "c3caf0f9e51197553082904a2655d51e5afcca579a3048cdfbd8a97f7b2cf2c3",
-    "value": "f2e02457fb9abf5fa635df12df7822bad4c288a8941f4c138e5b17f6ce6f257eff30cebc9ded7ba0556d24b971245b549d8ceb4cebfa1b2fc9954f2a778cc500"
+    "value": "e061809d6198484c1be159d856c163d3c03eca7941c784596508588e8127e74e3cb17fc012893b83cb69c759cba72a4a5ca7cca1ba6f7481e3b770e02ab1670d"
   }
 }

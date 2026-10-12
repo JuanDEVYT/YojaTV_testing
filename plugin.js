@@ -61,7 +61,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '3.0.4';
+const PLUGIN_VERSION = '3.0.5';
 
 function log(...args) {
   try {
@@ -204,6 +204,112 @@ function extractPackedJs(html) {
   }
 }
 
+async function extractMediafire(embedUrl) {
+  const r = await fetchText(embedUrl);
+  if (!r.ok) return null;
+  const m = r.text.match(/href="(https?:\/\/download[^"]+)"/i) || r.text.match(/aria-label="Download file"\s+href="([^"]+)"/i);
+  return m ? m[1] : null;
+}
+
+async function extractMp4upload(embedUrl) {
+  const r = await fetchText(embedUrl);
+  if (!r.ok) return null;
+  const m = r.text.match(/src:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/i) || r.text.match(/player\.src\("(https?:\/\/[^"]+)"\)/i);
+  return m ? m[1] : null;
+}
+
+async function resolveEmbedUrl(embedUrl, referer) {
+  if (!embedUrl || typeof embedUrl !== 'string') return null;
+  let u = embedUrl.trim();
+  if (u.startsWith('//')) u = 'https:' + u;
+  if (!u.startsWith('http')) return null;
+  if (u.includes('youtube.com') || u.includes('youtu.be')) return null;
+
+  if (/\.(m3u8|mp4)($|\?)/i.test(u)) {
+    return { url: u, headers: { 'User-Agent': UA } };
+  }
+
+  if (u.includes('vimeos.net') || u.includes('vimeos.zip')) {
+    const v = await fetchText(u, { Referer: referer || 'https://vimeos.net/' });
+    if (v.ok) {
+      const unpacked = extractPackedJs(v.text);
+      const m3u = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
+      if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
+      const mp4 = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
+      if (mp4) return { url: mp4[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
+    }
+    return null;
+  }
+
+  if (u.includes('goodstream.one')) {
+    const g = await fetchText(u, { Referer: referer || 'https://goodstream.one/' });
+    if (g.ok) {
+      const unpacked = extractPackedJs(g.text);
+      const m3u = (unpacked || g.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
+      if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://goodstream.one/' } };
+      const mp4 = (unpacked || g.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
+      if (mp4) return { url: mp4[1], headers: { 'User-Agent': UA, 'Referer': 'https://goodstream.one/' } };
+    }
+    return null;
+  }
+
+  if (u.includes('videoapp.zip')) {
+    const va = await fetchText(u, { Referer: referer || 'https://videoapp.zip/' });
+    if (va.ok) {
+      const ifr = /<iframe[^>]+src="([^"]+)"/i.exec(va.text);
+      if (ifr) return resolveEmbedUrl(ifr[1], u);
+    }
+    return null;
+  }
+
+  if (u.includes('voe.sx')) {
+    const vo = await fetchText(u, { Referer: referer });
+    if (vo.ok) {
+      const m3u = vo.text.match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
+      if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA } };
+    }
+    return null;
+  }
+
+  if (u.includes('filemoon.sx')) {
+    const fm = await fetchText(u, { Referer: referer });
+    if (fm.ok) {
+      const unpacked = extractPackedJs(fm.text);
+      const m3u = (unpacked || fm.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
+      if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA } };
+    }
+    return null;
+  }
+
+  if (u.includes('mediafire.com')) {
+    const mf = await extractMediafire(u);
+    if (mf) return { url: mf };
+    return null;
+  }
+
+  if (u.includes('mp4upload.com')) {
+    const mp = await extractMp4upload(u);
+    if (mp) return { url: mp };
+    return null;
+  }
+
+  // Generic embed inspection
+  try {
+    const gen = await fetchText(u, { Referer: referer });
+    if (gen.ok) {
+      const unpacked = extractPackedJs(gen.text);
+      const m3u = (unpacked || gen.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
+      if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, ...(referer ? { Referer: referer } : {}) } };
+      const mp4 = (unpacked || gen.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
+      if (mp4) return { url: mp4[1], headers: { 'User-Agent': UA, ...(referer ? { Referer: referer } : {}) } };
+      const ifr = /<iframe[^>]+src="([^"]+)"/i.exec(gen.text);
+      if (ifr && !ifr[1].includes(u)) return resolveEmbedUrl(ifr[1], u);
+    }
+  } catch {}
+
+  return null;
+}
+
 /* ---------- source registry ---------- */
 // Each entry: { id, label, host, mode, search(q), home(), detail(ref), episodes(ref), resolve(ref) }
 // `ref` is the source-local path; the plugin's public ref is "<id>:<path>".
@@ -247,20 +353,44 @@ registerSource({
     if (!r.ok) return null;
     const postIdM = r.text.match(/<body[^>]*class="[^"]*postid-(\d+)[^"]*"/i) || r.text.match(/id="post-(\d+)"/i);
     if (!postIdM) return null;
-    const streams = [];
-    for (let nume = 1; nume <= 6; nume++) {
+    const postTasks = [1, 2, 3, 4, 5, 6].map(async (nume) => {
       const res = await postForm('https://ver-peliculas-online.net/wp-admin/admin-ajax.php',
         'action=doo_player_ajax&post=' + postIdM[1] + '&type=movie&nume=' + nume, { Referer: movieUrl });
-      if (!res) continue;
+      if (!res) return null;
+      let embed = null;
       try {
-        const j = res.json();
-        if (j && typeof j.embed_url === 'string' && j.embed_url.startsWith('http')) {
-          streams.push({ label: 'VPO ' + nume, url: j.embed_url.trim() });
-        }
+        const j = typeof res.json === 'function' ? res.json() : JSON.parse(getText(res));
+        if (j && typeof j.embed_url === 'string' && j.embed_url.startsWith('http')) embed = j.embed_url.trim();
       } catch {}
-    }
+      if (!embed) return null;
+      const st = await resolveEmbedUrl(embed, movieUrl);
+      return st && st.url ? { label: 'VPO ' + nume, ...st } : { label: 'VPO ' + nume, url: embed };
+    });
+
+    const settled = await Promise.allSettled(postTasks);
+    const streams = settled.filter((s) => s.status === 'fulfilled' && s.value && s.value.url).map((s) => s.value);
     if (streams.length === 0) return null;
-    return { url: streams[0].url, alternatives: streams.slice(1, 8).map((s) => ({ label: s.label, url: s.url })) };
+
+    streams.sort((a, b) => {
+      const aDir = /\.(m3u8|mp4)($|\?)/i.test(a.url);
+      const bDir = /\.(m3u8|mp4)($|\?)/i.test(b.url);
+      if (aDir && !bDir) return -1;
+      if (!aDir && bDir) return 1;
+      return 0;
+    });
+
+    const primary = streams[0];
+    const alts = streams.slice(1, 8).map((s) => ({
+      label: s.label,
+      url: s.url,
+      ...(s.headers ? { headers: s.headers } : {})
+    }));
+
+    return {
+      url: primary.url,
+      ...(primary.headers ? { headers: primary.headers } : {}),
+      ...(alts.length > 0 ? { alternatives: alts } : {})
+    };
   },
   async episodes(path) {
     const [type, slug] = path.split(':');
@@ -287,19 +417,34 @@ registerSource({
   label: 'JKAnime',
   kind: 'anime',
   async search(q) {
-    const r = await fetchText('https://jkanime.net/buscar/' + encodeURIComponent(q) + '/1/');
+    const r = await fetchText('https://jkanime.net/buscar/' + encodeURIComponent(q) + '/');
     if (!r.ok) return [];
     const match = r.text.match(/var\s+animes\s*=\s*(\{[\s\S]*?\});\s*(?:var|\n|<)/);
-    if (!match) return [];
-    let data;
-    try { data = JSON.parse(match[1]); } catch { return []; }
-    const list = Array.isArray(data.data) ? data.data : [];
-    return list.map((x) => {
-      const slug = (x.slug || '').trim();
-      if (!isValidSlug(slug)) return null;
-      const isMovie = (x.tipo && x.tipo.toLowerCase().includes('pel')) || slug.includes('pelicula');
-      return { id: slug, ref: 'jkanime:' + slug, title: cleanText(x.title) || slugToTitle(slug), kind: isMovie ? 'movie' : 'series', poster: x.image || null, overview: cleanText(x.synopsis || '') };
-    }).filter(Boolean);
+    if (match) {
+      try {
+        const data = JSON.parse(match[1]);
+        const list = Array.isArray(data.data) ? data.data : [];
+        if (list.length > 0) {
+          return list.map((x) => {
+            const slug = (x.slug || '').trim();
+            if (!isValidSlug(slug)) return null;
+            const isMovie = (x.tipo && x.tipo.toLowerCase().includes('pel')) || slug.includes('pelicula');
+            return { id: slug, ref: 'jkanime:' + slug, title: cleanText(x.title) || slugToTitle(slug), kind: isMovie ? 'movie' : 'series', poster: x.image || null, overview: cleanText(x.synopsis || '') };
+          }).filter(Boolean);
+        }
+      } catch {}
+    }
+    const items = [];
+    const seen = new Set();
+    const cardRe = /<a[^>]+href="https:\/\/jkanime\.net\/([a-z0-9-]+)\/"[^>]*>[\s\S]{0,300}?<h5>([^<]+)<\/h5>/gi;
+    let cm;
+    while ((cm = cardRe.exec(r.text)) !== null) {
+      const slug = cm[1];
+      if (!isValidSlug(slug) || seen.has(slug)) continue;
+      seen.add(slug);
+      items.push({ id: slug, ref: 'jkanime:' + slug, title: cleanText(cm[2]) || slugToTitle(slug), kind: 'series' });
+    }
+    return items;
   },
   async home() {
     const r = await fetchText('https://jkanime.net/');
@@ -339,36 +484,36 @@ registerSource({
     let list;
     try { list = JSON.parse(serversMatch[1]); } catch { return null; }
     if (!Array.isArray(list) || list.length === 0) return null;
-    const streams = [];
-    for (const s of list) {
-      if (!s.remote) continue;
+
+    const serverTasks = list.map(async (s) => {
+      if (!s.remote) return null;
       let decoded = '';
-      try { decoded = atob(String(s.remote).trim()); } catch { continue; }
-      if (!decoded.startsWith('http')) continue;
+      try { decoded = atob(String(s.remote).trim()); } catch { return null; }
+      if (!decoded.startsWith('http')) return null;
       const serverName = (s.server || 'Servidor').trim();
-      let direct = null;
-      if (decoded.includes('mediafire.com')) direct = await jkanimeMediafire(decoded);
-      else if (decoded.includes('mp4upload.com')) direct = await jkanimeMp4upload(decoded);
-      streams.push({ label: serverName + (s.size ? ' (' + s.size + ')' : ''), url: direct || decoded.trim() });
-    }
+      const st = await resolveEmbedUrl(decoded, 'https://jkanime.net/');
+      if (st && st.url) return { label: serverName + (s.size ? ' (' + s.size + ')' : ''), ...st };
+      return { label: serverName + (s.size ? ' (' + s.size + ')' : ''), url: decoded.trim() };
+    });
+
+    const settled = await Promise.allSettled(serverTasks);
+    const streams = settled.filter((x) => x.status === 'fulfilled' && x.value && x.value.url).map((x) => x.value);
     if (streams.length === 0) return null;
-    return { url: streams[0].url, alternatives: streams.slice(1, 8).map((s) => ({ label: s.label, url: s.url })) };
+
+    const primary = streams[0];
+    const alts = streams.slice(1, 8).map((st) => ({
+      label: st.label,
+      url: st.url,
+      ...(st.headers ? { headers: st.headers } : {})
+    }));
+
+    return {
+      url: primary.url,
+      ...(primary.headers ? { headers: primary.headers } : {}),
+      ...(alts.length > 0 ? { alternatives: alts } : {})
+    };
   }
 });
-
-async function jkanimeMediafire(embedUrl) {
-  const r = await fetchText(embedUrl);
-  if (!r.ok) return null;
-  const m = r.text.match(/href="(https?:\/\/download[^"]+)"/i) || r.text.match(/aria-label="Download file"\s+href="([^"]+)"/i);
-  return m ? m[1] : null;
-}
-
-async function jkanimeMp4upload(embedUrl) {
-  const r = await fetchText(embedUrl);
-  if (!r.ok) return null;
-  const m = r.text.match(/src:\s*"(https?:\/\/[^"]+\.mp4[^"]*)"/i) || r.text.match(/player\.src\("(https?:\/\/[^"]+)"\)/i);
-  return m ? m[1] : null;
-}
 
 /* --- CINECALIDAD (DooPlay variant, direct data-option embeds) --- */
 registerSource({
@@ -453,30 +598,24 @@ registerSource({
     while ((om = optRe.exec(r.text)) !== null) opts.push(om[1]);
     if (opts.length === 0) return null;
 
-    const streams = [];
-    for (const opt of opts) {
-      try {
-        if (opt.includes('vimeos.net')) {
-          const v = await fetchText(opt, { Referer: url });
-          if (v.ok) {
-            const unpacked = extractPackedJs(v.text);
-            const m3u = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
-            if (m3u) streams.push({ url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } });
-            const mp4 = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
-            if (mp4) streams.push({ url: mp4[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } });
-          }
-        } else if (/\.(m3u8|mp4)($|\?)/i.test(opt)) {
-          streams.push({ url: opt, headers: { 'User-Agent': UA } });
-        } else {
-          streams.push({ url: opt, headers: { 'User-Agent': UA } });
-        }
-      } catch (err) {}
-    }
+    const settled = await Promise.allSettled(opts.map((opt) => resolveEmbedUrl(opt, url)));
+    const streams = settled
+      .filter((x) => x.status === 'fulfilled' && x.value && x.value.url)
+      .map((x) => x.value);
+
     if (streams.length === 0) return { url: opts[0], alternatives: opts.slice(1, 8).map((u, i) => ({ label: 'Servidor ' + (i + 2), url: u })) };
+
+    streams.sort((a, b) => {
+      const aV = a.url.includes('vimeos');
+      const bV = b.url.includes('vimeos');
+      if (aV && !bV) return 1;
+      if (!aV && bV) return -1;
+      return 0;
+    });
 
     const primary = streams[0];
     const alts = streams.slice(1, 8).map((st, i) => ({
-      label: 'Servidor ' + (i + 2),
+      label: st.label || 'Servidor ' + (i + 2),
       url: st.url,
       ...(st.headers ? { headers: st.headers } : {})
     }));
@@ -573,14 +712,12 @@ registerSource({
       return null;
     }
 
+    const settled = await Promise.allSettled(playMatches.map((pu) => resolvePlay(pu)));
     const streams = [];
-    for (const pu of playMatches) {
-      try {
-        const st = await resolvePlay(pu);
-        if (st && st.url && !streams.some((x) => x.url === st.url)) {
-          streams.push(st);
-        }
-      } catch (err) {}
+    for (const r of settled) {
+      if (r.status === 'fulfilled' && r.value && r.value.url && !streams.some((x) => x.url === r.value.url)) {
+        streams.push(r.value);
+      }
     }
     if (streams.length === 0) return null;
 
@@ -635,9 +772,14 @@ registerSource({
     const playerUrl = 'https:' + iframeM[1];
     const p = await fetchText(playerUrl, { Referer: permalink });
     if (!p.ok) return null;
-    const gotoM = /href="(\/\/api\.cinehdplus\.org\/ir\/goto\.php\?h=[^"]+)"/i.exec(p.text) || /location\.href\s*=\s*["'](\/\/api\.cinehdplus\.org\/ir\/goto\.php\?h=[^"']+)["']/i.exec(p.text);
+    const gotoM =
+      /href="((?:https:)?\/\/api\.cinehdplus\.org\/ir\/goto\.php\?h=[^"']+|goto\.php\?h=[^"']+)"/i.exec(p.text) ||
+      /location\.href\s*=\s*["']((?:https:)?\/\/api\.cinehdplus\.org\/ir\/goto\.php\?h=[^"']+|goto\.php\?h=[^"']+)["']/i.exec(p.text);
     if (gotoM) {
-      const g = await fetchText('https:' + gotoM[1], { Referer: playerUrl });
+      let gotoUrl = gotoM[1];
+      if (gotoUrl.startsWith('goto.php')) gotoUrl = 'https://api.cinehdplus.org/ir/' + gotoUrl;
+      else if (gotoUrl.startsWith('//')) gotoUrl = 'https:' + gotoUrl;
+      const g = await fetchText(gotoUrl, { Referer: playerUrl });
       if (g.ok) {
         const m3u = g.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
         if (m3u) return { url: m3u[1] };
@@ -647,6 +789,17 @@ registerSource({
           if (v.ok) {
             const m3u2 = v.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
             if (m3u2) return { url: m3u2[1] };
+          }
+        }
+        // redir chain: redir_ddh.php → rd.php (Base64+ROT13 encoded URL)
+        const rdM = /href="(https?:\/\/api\.cinehdplus\.org\/ir\/rd\.php[^"]+)"/i.exec(g.text);
+        if (rdM) {
+          const rd = await fetchText(rdM[1], { Referer: gotoUrl });
+          if (rd.ok) {
+            const m3u3 = rd.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
+            if (m3u3) return { url: m3u3[1] };
+            const ifrM = /<iframe[^>]+src="([^"]+)"/i.exec(rd.text);
+            if (ifrM) return { url: ifrM[1] };
           }
         }
       }
@@ -709,25 +862,35 @@ registerSource({
     if (!r.ok) return null;
     const nonceM = /nonce"?\s*[:=]\s*"([^"]+)"/.exec(r.text);
     if (!nonceM) return null;
-    let body = 'action=cinehax_get_embed&_ajax_nonce=' + encodeURIComponent(nonceM[1]) + '&id=' + id + '&tipo=' + tipo;
+    // Fixed: nonce param name, tipo→type, added server=0
+    let body = 'action=cinehax_get_embed&nonce=' + encodeURIComponent(nonceM[1]) + '&id=' + id + '&type=' + tipo + '&server=0';
     if (tipo === 'serie') body += '&season=' + season + '&episode=' + episode;
     const res = await postForm('https://cinehax.com/wp-admin/admin-ajax.php', body, { Referer: detailUrl });
     if (!res) return null;
     const txt = getText(res);
-    const m3u = txt.match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
-    if (m3u) return { url: m3u[1] };
-    const mp4 = txt.match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
-    if (mp4) return { url: mp4[1] };
-    const embedM = /href="(https?:\/\/[^"]+)"/i.exec(txt);
-    if (embedM) {
-      const e = await fetchText(embedM[1]);
-      if (e.ok) {
-        const m2 = e.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-        if (m2) return { url: m2[1] };
-      }
-      return { url: embedM[1] };
+    // Response: {"success":true,"data":{"url":"https://unlimplay.com/..."}}
+    let embedUrl = null;
+    try {
+      const j = JSON.parse(txt);
+      if (j && j.success && j.data && j.data.url) embedUrl = j.data.url;
+    } catch {}
+    if (!embedUrl) {
+      const m3u = txt.match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
+      if (m3u) return { url: m3u[1] };
+      const mp4 = txt.match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
+      if (mp4) return { url: mp4[1] };
+      const urlM = /"url"\s*:\s*"(https?:\/\/[^"]+)"/i.exec(txt);
+      if (urlM) embedUrl = urlM[1];
     }
-    return null;
+    if (!embedUrl) return null;
+    const e = await fetchText(embedUrl, { Referer: detailUrl });
+    if (e.ok) {
+      const m3u = e.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
+      if (m3u) return { url: m3u[1] };
+      const mp4 = e.text.match(/(https?:\/\/[^"'\s]+\.mp4[^"'\s]*)/i);
+      if (mp4) return { url: mp4[1] };
+    }
+    return { url: embedUrl };
   }
 });
 
@@ -798,25 +961,33 @@ registerSource({
     }
     if (opts.length === 0) return null;
     await fetchText('https://sololatino.net/sanctum/csrf-cookie', { Referer: url });
-    let token = kino.cookies.get('https://sololatino.net/', 'XSRF-TOKEN');
-    try { token = token ? decodeURIComponent(token) : ''; } catch { token = token || ''; }
-    for (const o of opts) {
-      const res = await postJson('https://sololatino.net/api/player-url', { t: o.token }, { Referer: url, Origin: 'https://sololatino.net', 'X-XSRF-TOKEN': token || '' });
-      if (!res) continue;
+    let xsrf = kino.cookies.get('https://sololatino.net/', 'XSRF-TOKEN');
+    try { xsrf = xsrf ? decodeURIComponent(xsrf) : ''; } catch { xsrf = xsrf || ''; }
+
+    async function resolveOpt(o) {
+      const res = await postJson('https://sololatino.net/api/player-url', { t: o.token }, { Referer: url, Origin: 'https://sololatino.net', 'X-XSRF-TOKEN': xsrf || '' });
+      if (!res) return null;
       let j;
-      try { j = JSON.parse(getText(res)); } catch { continue; }
+      try { j = JSON.parse(getText(res)); } catch { return null; }
       const embedUrl = j && j.url;
-      if (!embedUrl || !String(embedUrl).startsWith('http')) continue;
+      if (!embedUrl || !String(embedUrl).startsWith('http')) return null;
       const e = await fetchText(embedUrl, { Referer: url });
       if (e.ok) {
         const m3u = e.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-        if (m3u) return { url: m3u[1] };
-        const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(e.text);
-        if (iframeM) return { url: iframeM[1] };
+        if (m3u) return { label: o.label, url: m3u[1] };
+        const ifrM = /<iframe[^>]+src="([^"]+)"/i.exec(e.text);
+        if (ifrM) return { label: o.label, url: ifrM[1] };
       }
-      return { url: embedUrl };
+      return { label: o.label, url: embedUrl };
     }
-    return null;
+
+    const settled = await Promise.allSettled(opts.map((o) => resolveOpt(o)));
+    const streams = settled.filter((x) => x.status === 'fulfilled' && x.value).map((x) => x.value);
+    if (streams.length === 0) return null;
+    return {
+      url: streams[0].url,
+      ...(streams.length > 1 ? { alternatives: streams.slice(1, 6).map((s) => ({ label: s.label, url: s.url })) } : {})
+    };
   }
 });
 
@@ -912,16 +1083,32 @@ registerSource({
       if (directM) opts.push({ label: 'Directo', url: directM[1] });
     }
     if (opts.length === 0) return null;
-    for (const o of opts) {
+
+    // Parallelize all server fetches
+    async function resolveOpt(o) {
       const g = await fetchText(o.url, { Referer: frameUrl });
-      if (!g.ok) continue;
+      if (!g.ok) return null;
       const m3u = g.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-      if (m3u) return { url: m3u[1], alternatives: opts.filter((x) => x !== o).slice(0, 6).map((x) => ({ label: x.label, url: x.url })) };
+      if (m3u) return { label: o.label, url: m3u[1], headers: { 'Referer': 'https://embed.pelisgratishd.lat/' } };
       const mp4 = g.text.match(/(https?:\/\/[^"'\s]+\.mp4[^"'\s]*)/i);
-      if (mp4) return { url: mp4[1], alternatives: opts.filter((x) => x !== o).slice(0, 6).map((x) => ({ label: x.label, url: x.url })) };
+      if (mp4) return { label: o.label, url: mp4[1], headers: { 'Referer': 'https://embed.pelisgratishd.lat/' } };
+      return null;
+    }
+
+    const settled = await Promise.allSettled(opts.map((o) => resolveOpt(o)));
+    const resolved = settled.filter((x) => x.status === 'fulfilled' && x.value).map((x) => x.value);
+
+    if (resolved.length > 0) {
+      const primary = resolved[0];
+      return {
+        url: primary.url,
+        ...(primary.headers ? { headers: primary.headers } : {}),
+        ...(resolved.length > 1 ? { alternatives: resolved.slice(1, 7).map((s) => ({ label: s.label, url: s.url, ...(s.headers ? { headers: s.headers } : {}) })) } : {})
+      };
     }
     return { url: opts[0].url, alternatives: opts.slice(1, 6).map((x) => ({ label: x.label, url: x.url })) };
   }
+
 });
 
 /* --- CUEVANASERIE --- */
@@ -1021,12 +1208,23 @@ registerSource({
 });
 
 /* --- PLUTO.TV (JSON API, free live/VOD) --- */
+let _plutoToken = null;
+let _plutoTokenTs = 0;
+async function getPlutoToken() {
+  const now = Date.now();
+  if (_plutoToken && (now - _plutoTokenTs) < 3600000) return _plutoToken;
+  const j = await fetchJson('https://boot.pluto.tv/v4/start?appName=web&appVersion=unknown&deviceVersion=126.0.0.0&deviceModel=web&deviceMake=Chrome&deviceType=web&clientID=web&clientModelNumber=1.0');
+  const tok = j && (j.sessionToken || (j.session && j.session.sessionToken));
+  if (tok) { _plutoToken = tok; _plutoTokenTs = now; }
+  return _plutoToken || null;
+}
 registerSource({
   id: 'pluto',
   label: 'Pluto TV',
   kind: 'movie',
   async search(q) {
-    const j = await fetchJson('https://service-media-search.clusters.pluto.tv/v1/search?query=' + encodeURIComponent(q) + '&limit=30');
+    // Fixed: param is q= not query=
+    const j = await fetchJson('https://service-media-search.clusters.pluto.tv/v1/search?q=' + encodeURIComponent(q) + '&limit=30');
     if (!j || !Array.isArray(j.hits)) return [];
     return j.hits.slice(0, 30).map((h, i) => {
       const id = sanitizeId(h.id || h.slug || String(i), 'pluto');
@@ -1034,12 +1232,15 @@ registerSource({
     }).filter((x) => x.ref && x.ref.split(':')[1]);
   },
   async resolve(path) {
-    const j = await fetchJson('https://service-vod.clusters.pluto.tv/v2/item/' + path + '/playbackInfo?deviceMake=Chrome&deviceType=web&deviceVersion=126.0.0.0&appName=web&appVersion=unknown');
+    const token = await getPlutoToken();
+    const authHdr = token ? { 'Authorization': 'Bearer ' + token } : {};
+    const j = await fetchJson('https://service-vod.clusters.pluto.tv/v2/item/' + path + '/playbackInfo?deviceMake=Chrome&deviceType=web&deviceVersion=126.0.0.0&appName=web&appVersion=unknown', authHdr);
     if (j && j.data) {
       const m3u = String(j.data).match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
       if (m3u) return { url: m3u[1] };
     }
-    const s = await fetchJson('https://cfd-v4-service-channel-stitcher-use1-1.prd.pluto.tv/v2/stitch/hls/channel/' + path + '.m3u8?deviceId=1234567890123456&deviceMake=Chrome&deviceType=web&deviceVersion=126.0.0.0&appName=web&appVersion=unknown&clientID=1234567890123456&clientModelNumber=1.0.0&sessionID=1234567890123456&serverSideAds=false');
+    if (j && j.streamingUrl) return { url: j.streamingUrl };
+    const s = await fetchJson('https://cfd-v4-service-channel-stitcher-use1-1.prd.pluto.tv/v2/stitch/hls/channel/' + path + '.m3u8?deviceId=1234567890123456&deviceMake=Chrome&deviceType=web&deviceVersion=126.0.0.0&appName=web&appVersion=unknown&clientID=1234567890123456&clientModelNumber=1.0.0&sessionID=1234567890123456&serverSideAds=false', authHdr);
     if (s) {
       const m = JSON.stringify(s).match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
       if (m) return { url: m[1] };
@@ -1196,9 +1397,9 @@ registerSource({
     const r = await fetchText(dataUrl);
     if (r.ok) {
       const zillaM = /https?:\/\/player\.zilla-networks\.com\/play\/([A-Za-z0-9_-]+)/.exec(r.text);
-      if (zillaM) return { url: 'https://player.zilla-networks.com/m3u8/' + zillaM[1] };
+      if (zillaM) return { url: 'https://player.zilla-networks.com/m3u8/' + zillaM[1], headers: { 'Referer': 'https://animeav1.com/' } };
       const m3u = r.text.match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
-      if (m3u) return { url: m3u[1] };
+      if (m3u) return { url: m3u[1], headers: { 'Referer': 'https://animeav1.com/' } };
       const mp4 = r.text.match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
       if (mp4) return { url: mp4[1] };
     }
@@ -1208,9 +1409,9 @@ registerSource({
     const hr = await fetchText(pageUrl);
     if (hr.ok) {
       const zillaM = /https?:\/\/player\.zilla-networks\.com\/(?:play|m3u8)\/([A-Za-z0-9_-]+)/.exec(hr.text);
-      if (zillaM) return { url: 'https://player.zilla-networks.com/m3u8/' + zillaM[1] };
+      if (zillaM) return { url: 'https://player.zilla-networks.com/m3u8/' + zillaM[1], headers: { 'Referer': 'https://animeav1.com/' } };
       const m3u = hr.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-      if (m3u) return { url: m3u[1] };
+      if (m3u) return { url: m3u[1], headers: { 'Referer': 'https://animeav1.com/' } };
     }
     return null;
   }
@@ -1313,26 +1514,28 @@ registerSource({
       servers.push({ url: u, label: u.includes('zilla') ? 'Zilla' : u.includes('voe') ? 'VOE' : u.includes('mp4upload') ? 'Mp4Upload' : 'Servidor' });
     }
     if (servers.length === 0) return null;
-    const streams = [];
-    for (const s of servers) {
-      let direct = null;
-      if (/\.m3u8(\?|$)/i.test(s.url)) direct = s.url;
-      else if (s.url.includes('mp4upload.com')) direct = await jkanimeMp4upload(s.url);
-      else if (s.url.includes('voe.sx')) {
-        const v = await fetchText(s.url, { Referer: url });
-        if (v.ok) {
-          const vm = v.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-          if (vm) direct = vm[1];
-        }
-      } else {
-        const e = await fetchText(s.url, { Referer: url });
-        if (e.ok) {
-          const em = e.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-          if (em) direct = em[1];
-        }
+    // Filter to known-safe hosts only to stay within request budget
+    const ALLOWED_HOSTS = ['zilla-networks.com', 'mp4upload.com', 'voe.sx', 'filemoon.sx', 'goodstream.one', 'streamtape.com'];
+    const validServers = servers.filter((s) => ALLOWED_HOSTS.some((h) => s.url.includes(h)) || /\.m3u8(\?|$)/i.test(s.url));
+    const toResolve = (validServers.length > 0 ? validServers : servers).slice(0, 6);
+
+    async function resolveAfvServer(s) {
+      if (/\.m3u8(\?|$)/i.test(s.url)) return { label: s.label, url: s.url };
+      if (s.url.includes('mp4upload.com')) {
+        const d = await jkanimeMp4upload(s.url);
+        return d ? { label: s.label, url: d } : null;
       }
-      streams.push({ label: s.label, url: direct || s.url });
+      const r = await fetchText(s.url, { Referer: url });
+      if (!r.ok) return null;
+      const m3u = r.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
+      if (m3u) return { label: s.label, url: m3u[1] };
+      const mp4 = r.text.match(/(https?:\/\/[^"'\s]+\.mp4[^"'\s]*)/i);
+      if (mp4) return { label: s.label, url: mp4[1] };
+      return { label: s.label, url: s.url };
     }
+
+    const settled = await Promise.allSettled(toResolve.map((s) => resolveAfvServer(s)));
+    const streams = settled.filter((x) => x.status === 'fulfilled' && x.value).map((x) => x.value);
     if (streams.length === 0) return null;
     return { url: streams[0].url, alternatives: streams.slice(1, 8).map((s) => ({ label: s.label, url: s.url })) };
   }
@@ -1367,12 +1570,28 @@ registerSource({
     const parts = path.split(':');
     const type = parts[0], tmdbId = parts[1];
     const season = parts[2] || '1', episode = parts[3] || '1';
+    // Fixed: path-based endpoint /api/embed-tmdb/<id>?type=...
     const embedUrl = type === 'series'
-      ? 'https://net79.cc/api/embed-tmdb?tmdbId=' + tmdbId + '&type=tv&season=' + season + '&episode=' + episode
-      : 'https://net79.cc/api/embed-tmdb?tmdbId=' + tmdbId + '&type=movie';
+      ? 'https://net79.cc/api/embed-tmdb/' + tmdbId + '?type=tv&se=' + season + '&ep=' + episode
+      : 'https://net79.cc/api/embed-tmdb/' + tmdbId + '?type=movie';
     const j = await fetchJson(embedUrl);
-    if (j && j.url) return { url: j.url };
-    if (j && j.sources) {
+    if (!j) return null;
+    if (j.url) return { url: j.url };
+    // Response may be array of quality sources [{quality, url}]
+    if (Array.isArray(j)) {
+      const sorted = j.filter((x) => x && x.url).sort((a, b) => {
+        const qa = parseInt(String(a.quality || '0'));
+        const qb = parseInt(String(b.quality || '0'));
+        return qb - qa; // highest quality first
+      });
+      if (sorted.length > 0) {
+        return {
+          url: sorted[0].url,
+          ...(sorted.length > 1 ? { alternatives: sorted.slice(1, 8).map((s) => ({ label: (s.quality || '') + 'p', url: s.url })) } : {})
+        };
+      }
+    }
+    if (j.sources) {
       const s = j.sources.find((x) => x.url) || j.sources[0];
       if (s && s.url) return { url: s.url };
     }
@@ -1396,12 +1615,38 @@ registerSource({
   },
   async resolve(path) {
     const [type, id] = path.split(':');
+    const pageUrl = 'https://onlyflix.to/' + (type === 'series' ? 'tv' : 'movie') + '/' + id + '/';
+    // Try REST meta first (fast path)
     const j = await fetchJson('https://onlyflix.to/wp-json/wp/v2/' + (type === 'series' ? 'tv' : 'movies') + '/' + id);
     if (j && j.meta && j.meta.embed) return { url: j.meta.embed };
-    const r = await fetchText('https://onlyflix.to/' + (type === 'series' ? 'tv' : 'movie') + '/' + id + '/');
+    const r = await fetchText(pageUrl);
     if (!r.ok) return null;
-    const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(r.text);
-    if (iframeM) return { url: iframeM[1] };
+    // Extract nonce + post_id for AJAX player list
+    const nonceM = /"nonce"\s*:\s*"([^"]+)"/.exec(r.text) || /nonce['"]\s*[:=]\s*['"]([^'"]+)['"]/.exec(r.text);
+    const postIdM = /"post_id"\s*:\s*(\d+)/.exec(r.text) || /data-post(?:-id)?=["'](\d+)["']/.exec(r.text);
+    if (nonceM && postIdM) {
+      const body = 'action=mcp_get_available_players&nonce=' + encodeURIComponent(nonceM[1]) + '&post_id=' + postIdM[1] + '&type=' + (type === 'series' ? 'tv' : 'movie');
+      const res = await postForm('https://onlyflix.to/wp-admin/admin-ajax.php', body, { Referer: pageUrl });
+      if (res) {
+        const txt = getText(res);
+        try {
+          const pj = JSON.parse(txt);
+          const players = pj && pj.data ? (Array.isArray(pj.data) ? pj.data : Object.values(pj.data)) : [];
+          const urls = players.map((p) => p.url || p.link || p).filter((u) => typeof u === 'string' && u.startsWith('http'));
+          if (urls.length > 0) {
+            return {
+              url: urls[0],
+              ...(urls.length > 1 ? { alternatives: urls.slice(1, 6).map((u, i) => ({ label: 'Servidor ' + (i + 2), url: u })) } : {})
+            };
+          }
+        } catch {}
+        const urlsRaw = [...txt.matchAll(/(https?:\/\/[^"'\s\\]+)/g)].map((m) => m[1]).filter((u) => !u.includes('youtube'));
+        if (urlsRaw.length > 0) return { url: urlsRaw[0] };
+      }
+    }
+    // Fallback: first non-youtube iframe
+    const iframes = [...r.text.matchAll(/<iframe[^>]+src="([^"]+)"/gi)].map((m) => m[1]).filter((u) => !u.includes('youtube'));
+    if (iframes.length > 0) return { url: iframes[0] };
     const m3u = r.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
     return m3u ? { url: m3u[1] } : null;
   }
@@ -1417,17 +1662,18 @@ registerSource({
     if (!r.ok) return [];
     const items = [];
     const seen = new Set();
-    const re = /<a[^>]+href="(https:\/\/www\.pelisplushd\.la\/[^"]+\/)"/g;
+    // Match both absolute (https://www.pelisplushd.la/...) and relative (/pelicula/... or /serie/...) hrefs
+    const re = /href="(?:https:\/\/www\.pelisplushd\.la)?(\/(?:pelicula|serie|pelicula-animada|serie-animada)\/[^"\/]+\/)"/g;
     let m;
     while ((m = re.exec(r.text)) !== null) {
-      const path = m[1].replace('https://www.pelisplushd.la', '');
+      const path = m[1];
       const slug = path.split('/').filter(Boolean).pop();
       if (!isValidSlug(slug)) continue;
       const type = path.includes('/serie') ? 'series' : 'movie';
       const id = sanitizeId(slug, 'ppd');
       if (seen.has(id)) continue;
       seen.add(id);
-      const block = r.text.slice(Math.max(0, m.index - 400), m.index + 400);
+      const block = r.text.slice(Math.max(0, m.index - 400), m.index + 600);
       const titleM = /alt="([^"]+)"/.exec(block);
       const imgM = /src="([^"]+)"/.exec(block);
       items.push({ id, ref: 'ppd:' + path, title: cleanText(titleM ? titleM[1] : '') || slugToTitle(slug), kind: type, poster: imgM ? imgM[1] : null });
@@ -1482,6 +1728,32 @@ registerSource({
     const url = path.startsWith('http') ? path : 'https://1movies.stream' + path;
     const r = await fetchText(url);
     if (!r.ok) return null;
+    // Extract data-token from the watch block — no static iframe on this site
+    const tokenM = /data-token="([^"]+)"/.exec(r.text) || /class="watch_block"[^>]*data-(?:id|token)="([^"]+)"/.exec(r.text);
+    if (tokenM) {
+      const token = tokenM[1];
+      const res = await postForm('https://1movies.stream/ajax/ajax.php', 'players=' + encodeURIComponent(token), { Referer: url, 'X-Requested-With': 'XMLHttpRequest' });
+      if (res) {
+        const txt = getText(res);
+        try {
+          const servers = JSON.parse(txt);
+          if (Array.isArray(servers) && servers.length > 0) {
+            const valid = servers.filter((s) => s && (s.link || s.url));
+            if (valid.length > 0) {
+              const primary = valid[0];
+              const primaryUrl = primary.link || primary.url;
+              return {
+                url: primaryUrl,
+                ...(valid.length > 1 ? { alternatives: valid.slice(1, 6).map((s) => ({ label: s.name || 'Servidor', url: s.link || s.url })) } : {})
+              };
+            }
+          }
+        } catch {}
+        const m3u = txt.match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
+        if (m3u) return { url: m3u[1] };
+      }
+    }
+    // Fallback: static iframe or m3u8 in page
     const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(r.text);
     if (iframeM) {
       const e = await fetchText(iframeM[1], { Referer: url });
