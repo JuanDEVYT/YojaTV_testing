@@ -61,7 +61,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '3.0.3';
+const PLUGIN_VERSION = '3.0.4';
 
 function log(...args) {
   try {
@@ -583,6 +583,14 @@ registerSource({
       } catch (err) {}
     }
     if (streams.length === 0) return null;
+
+    streams.sort((a, b) => {
+      const aV = a.url.includes('vimeos');
+      const bV = b.url.includes('vimeos');
+      if (aV && !bV) return 1;
+      if (!aV && bV) return -1;
+      return 0;
+    });
 
     const primary = streams[0];
     const alts = streams.slice(1, 8).map((st, i) => ({
@@ -1727,14 +1735,22 @@ export async function episodes(params) {
   log(`[episodes] called with ref: "${ref}"`);
   if (!ref) return { episodes: [] };
 
-  const [srcId, ...rest] = ref.split(':');
+  let srcId, path;
+  if (ref.includes(':')) {
+    const parts = ref.split(':');
+    srcId = parts[0];
+    path = parts.slice(1).join(':');
+  } else {
+    srcId = SOURCES[ref] ? ref : 'jkanime';
+    path = ref;
+  }
+
   const src = SOURCES[srcId];
   if (!src || !src.episodes) {
     log(`[episodes] source ${srcId} not found or has no episodes`);
     return { episodes: [] };
   }
 
-  const path = rest.join(':');
   const eps = await src.episodes(path);
   log(`[episodes] ${srcId} returned ${(eps.episodes || []).length} episodes`);
   return { episodes: eps.episodes || [] };
@@ -1751,7 +1767,16 @@ export async function resolve(params) {
     throw kino.error('not_found', 'Referencia no especificada');
   }
 
-  const [srcId, ...rest] = ref.split(':');
+  let srcId, path;
+  if (ref.includes(':')) {
+    const parts = ref.split(':');
+    srcId = parts[0];
+    path = parts.slice(1).join(':');
+  } else {
+    srcId = SOURCES[ref] ? ref : 'cv';
+    path = ref;
+  }
+
   const src = SOURCES[srcId];
   if (!src) {
     log(`[resolve ERROR] unknown source: ${srcId}`);
@@ -1762,7 +1787,6 @@ export async function resolve(params) {
     throw kino.error('unavailable', 'Esta fuente no soporta reproducción directa');
   }
 
-  const path = rest.join(':');
   log(`[resolve] calling ${srcId}.resolve with path: "${path}"`);
   const stream = await src.resolve(path);
   if (!stream || !stream.url) {
