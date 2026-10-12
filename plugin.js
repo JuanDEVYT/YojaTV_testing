@@ -79,7 +79,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '3.0.8';
+const PLUGIN_VERSION = '3.0.9';
 
 function log(...args) {
   try {
@@ -243,8 +243,13 @@ async function resolveEmbedUrl(embedUrl, referer) {
   if (!u.startsWith('http')) return null;
   if (u.includes('youtube.com') || u.includes('youtu.be')) return null;
 
-  if (/\.(m3u8|mp4)($|\?)/i.test(u)) {
-    return { url: u, headers: { 'User-Agent': UA } };
+  if (u.includes('player.zilla-networks.com')) {
+    const directZilla = u.replace('/play/', '/m3u8/');
+    return { url: directZilla, headers: { 'User-Agent': UA, 'Referer': referer || 'https://animeav1.com/' } };
+  }
+
+  if (/\.(m3u8|mp4)($|\?)/i.test(u) && !u.includes('/e/') && !u.includes('/embed') && !u.includes('streamtape.com')) {
+    return { url: u, headers: { 'User-Agent': UA, ...(referer ? { Referer: referer } : {}) } };
   }
 
   if (u.includes('vimeos.net') || u.includes('vimeos.zip')) {
@@ -311,6 +316,26 @@ async function resolveEmbedUrl(embedUrl, referer) {
   if (u.includes('mp4upload.com')) {
     const mp = await extractMp4upload(u);
     if (mp) return { url: mp };
+    return null;
+  }
+
+  if (u.includes('vidhide') || u.includes('callistanise.com')) {
+    const vh = await fetchText(u, { Referer: referer });
+    if (vh.ok) {
+      const unpacked = extractPackedJs(vh.text);
+      const m3u = (unpacked || vh.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
+      if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': u } };
+    }
+    return null;
+  }
+
+  if (u.includes('streamwish') || u.includes('flaswish.com') || u.includes('sfastwish.com')) {
+    const sw = await fetchText(u, { Referer: referer });
+    if (sw.ok) {
+      const unpacked = extractPackedJs(sw.text);
+      const m3u = (unpacked || sw.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
+      if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': u } };
+    }
     return null;
   }
 
@@ -1120,12 +1145,8 @@ registerSource({
 
     // Parallelize all server fetches
     async function resolveOpt(o) {
-      const g = await fetchText(o.url, { Referer: frameUrl });
-      if (!g.ok) return null;
-      const m3u = g.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-      if (m3u) return { label: o.label, url: m3u[1], headers: { 'Referer': 'https://embed.pelisgratishd.lat/' } };
-      const mp4 = g.text.match(/(https?:\/\/[^"'\s]+\.mp4[^"'\s]*)/i);
-      if (mp4) return { label: o.label, url: mp4[1], headers: { 'Referer': 'https://embed.pelisgratishd.lat/' } };
+      const st = await resolveEmbedUrl(o.url, frameUrl);
+      if (st && st.url) return { label: o.label, ...st };
       return null;
     }
 
@@ -1590,18 +1611,9 @@ registerSource({
     const toResolve = (validServers.length > 0 ? validServers : servers).slice(0, 6);
 
     async function resolveAfvServer(s) {
-      if (/\.m3u8(\?|$)/i.test(s.url)) return { label: s.label, url: s.url };
-      if (s.url.includes('mp4upload.com')) {
-        const d = await jkanimeMp4upload(s.url);
-        return d ? { label: s.label, url: d } : null;
-      }
-      const r = await fetchText(s.url, { Referer: url });
-      if (!r.ok) return null;
-      const m3u = r.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-      if (m3u) return { label: s.label, url: m3u[1] };
-      const mp4 = r.text.match(/(https?:\/\/[^"'\s]+\.mp4[^"'\s]*)/i);
-      if (mp4) return { label: s.label, url: mp4[1] };
-      return null;  // Never return a raw embed page as a stream
+      const st = await resolveEmbedUrl(s.url, url);
+      if (st && st.url) return { label: s.label, ...st };
+      return null;
     }
 
     const settled = await Promise.allSettled(toResolve.map((s) => resolveAfvServer(s)));
@@ -1637,13 +1649,28 @@ registerSource({
   async episodes(path) {
     const [type, tmdbId] = path.split(':');
     if (type !== 'series') return { episodes: [] };
+    // Primary: catalog detail endpoint
     const j = await fetchJson('https://net79.cc/api/catalog/detail?tmdbId=' + tmdbId + '&type=tv');
-    if (!j || !j.seasons) return { episodes: [] };
-    const list = [];
-    for (const s of j.seasons) {
-      for (const e of (s.episodes || [])) list.push({ season: s.season || s.number || 1, number: e.episode || e.number || 1, title: e.title || null, ref: 'n79:serie:' + tmdbId + ':' + (s.season || 1) + ':' + (e.episode || 1) });
+    if (j && j.seasons && j.seasons.length > 0) {
+      const list = [];
+      for (const s of j.seasons) {
+        for (const e of (s.episodes || [])) list.push({ season: s.season || s.number || 1, number: e.episode || e.number || 1, title: e.title || null, ref: 'n79:serie:' + tmdbId + ':' + (s.season || 1) + ':' + (e.episode || 1) });
+      }
+      if (list.length > 0) return { episodes: list };
     }
-    return { episodes: list };
+    // Fallback: probe embed endpoint for seasons 1-3 episodes 1-26
+    const list = [];
+    for (let s = 1; s <= 3; s++) {
+      let found = false;
+      for (let e = 1; e <= 26; e++) {
+        const ej = await fetchJson('https://net79.cc/api/embed-tmdb/' + tmdbId + '?type=tv&se=' + s + '&ep=' + e);
+        if (!ej || (!ej.url && !ej.mp4 && !(Array.isArray(ej) && ej.length > 0) && !ej.sources)) break;
+        list.push({ season: s, number: e, title: null, ref: 'n79:serie:' + tmdbId + ':' + s + ':' + e });
+        found = true;
+      }
+      if (!found) break;
+    }
+    return { episodes: list.length > 0 ? list : [{ season: 1, number: 1, title: 'Episodio 1', ref: 'n79:serie:' + tmdbId + ':1:1' }] };
   },
   async resolve(path) {
     const parts = path.split(':');
@@ -1795,10 +1822,18 @@ registerSource({
     const url = 'https://pelisplushd.la' + path;
     const r = await fetchText(url);
     if (!r.ok) return null;
-    const dataUrlM = /data-url="([^"]+)"/.exec(r.text);
-    if (dataUrlM) {
-      const st = await resolveEmbedUrl(dataUrlM[1], url);
-      if (st && st.url) return st;
+    const dataUrls = [...r.text.matchAll(/data-url="([^"]+)"/g)].map((m) => m[1]);
+    if (dataUrls.length > 0) {
+      const settled = await Promise.allSettled(dataUrls.map((du) => resolveEmbedUrl(du, url)));
+      const resolved = settled.filter((x) => x.status === 'fulfilled' && x.value && x.value.url).map((x) => x.value);
+      if (resolved.length > 0) {
+        const primary = resolved[0];
+        return {
+          url: primary.url,
+          ...(primary.headers ? { headers: primary.headers } : {}),
+          ...(resolved.length > 1 ? { alternatives: resolved.slice(1, 7).map((s, i) => ({ label: 'Servidor ' + (i + 2), url: s.url, ...(s.headers ? { headers: s.headers } : {}) })) } : {})
+        };
+      }
     }
     const m3u = r.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
     if (m3u) return { url: m3u[1] };
