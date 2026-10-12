@@ -61,18 +61,22 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
+const PLUGIN_VERSION = '3.0.2';
+
 function log(...args) {
   try {
     if (typeof kino !== 'undefined' && kino.log) {
-      kino.log('[YojaTV]', ...args);
+      kino.log(`[YojaTV v${PLUGIN_VERSION}]`, ...args);
     }
   } catch {}
   try {
     if (typeof console !== 'undefined' && console.log) {
-      console.log('[YojaTV]', ...args);
+      console.log(`[YojaTV v${PLUGIN_VERSION}]`, ...args);
     }
   } catch {}
 }
+
+log(`Iniciando plugin YojaTV v${PLUGIN_VERSION}`);
 
 async function fetchText(url, headers) {
   log(`[HTTP GET] -> ${url}`);
@@ -513,11 +517,11 @@ registerSource({
       if (v.ok) {
         const unpacked = extractPackedJs(v.text);
         const m3u = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
-        if (m3u) return { url: m3u[1] };
+        if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
         const mp4 = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
-        if (mp4) return { url: mp4[1] };
+        if (mp4) return { url: mp4[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
       }
-      return { url: target };
+      return { url: target, headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
     }
     const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(p.text);
     if (iframeM) {
@@ -525,15 +529,15 @@ registerSource({
       if (emb.ok) {
         const unpacked = extractPackedJs(emb.text);
         const m3u = (unpacked || emb.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
-        if (m3u) return { url: m3u[1] };
+        if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
         const mp4 = (unpacked || emb.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
-        if (mp4) return { url: mp4[1] };
+        if (mp4) return { url: mp4[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
       }
-      return { url: iframeM[1] };
+      return { url: iframeM[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
     }
     const unpacked = extractPackedJs(p.text);
     const m3u = (unpacked || p.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
-    return m3u ? { url: m3u[1] } : null;
+    return m3u ? { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } } : null;
   }
 });
 
