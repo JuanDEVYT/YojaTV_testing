@@ -51,6 +51,24 @@ function isValidSlug(s) {
   return typeof s === 'string' && ITEM_ID_RE.test(s) && !RESERVED_SLUGS.has(s);
 }
 
+/** Robust poster extractor: ignores data: placeholders, searches data-src/data-lazy-src/src, handles relative URLs. */
+function extractPoster(htmlSnippet, baseDomain) {
+  if (!htmlSnippet) return null;
+  // Look for data-src, data-lazy-src, data-original, or src
+  const re = /(?:data-src|data-lazy-src|data-original|data-srcset|srcset|src)=["']([^"'\s,]+)/gi;
+  let m;
+  let fallback = null;
+  while ((m = re.exec(htmlSnippet)) !== null) {
+    let candidate = m[1].trim();
+    if (!candidate || candidate.startsWith('data:')) continue;
+    if (candidate.startsWith('//')) candidate = 'https:' + candidate;
+    else if (candidate.startsWith('/') && baseDomain) candidate = baseDomain.replace(/\/+$/, '') + candidate;
+    if (candidate.startsWith('http')) return candidate;
+    if (!fallback && candidate) fallback = candidate;
+  }
+  return fallback;
+}
+
 /** Sanitize a title/slug into a valid Kino item id (<=128 chars, ITEM_ID_RE charset). */
 function sanitizeId(raw, prefix) {
   const base = String(raw || '').toLowerCase().replace(/[^a-z0-9._~-]+/g, '-').replace(/^-+|-+$/g, '');
@@ -61,7 +79,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '3.0.6';
+const PLUGIN_VERSION = '3.0.7';
 
 function log(...args) {
   try {
@@ -340,8 +358,30 @@ registerSource({
       if (seen.has(id)) continue;
       seen.add(id);
       const titleM = block.match(/alt="([^"]+)"/i) || block.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
-      const imgM = block.match(/data-src="([^"]+)"/i) || block.match(/src="(https?:\/\/[^"]+)"/i);
-      items.push({ id, ref: 'vpo:' + type + ':' + slug, title: cleanText(titleM ? titleM[1] : '') || slugToTitle(slug), kind: type, poster: imgM ? imgM[1] : null });
+      const poster = extractPoster(block, 'https://ver-peliculas-online.net');
+      items.push({ id, ref: 'vpo:' + type + ':' + slug, title: cleanText(titleM ? titleM[1] : '') || slugToTitle(slug), kind: type, poster });
+    }
+    return items;
+  },
+  async home() {
+    const r = await fetchText('https://ver-peliculas-online.net/');
+    if (!r.ok) return [];
+    const items = [];
+    const seen = new Set();
+    const cardRe = /<article[^>]*>([\s\S]*?)<\/article>/gi;
+    let m;
+    while ((m = cardRe.exec(r.text)) !== null) {
+      const block = m[1];
+      const linkM = block.match(/href="https:\/\/ver-peliculas-online\.net\/(pelicula|serie)\/([^"\/]+)\/?"/i);
+      if (!linkM) continue;
+      const type = linkM[1] === 'serie' ? 'series' : 'movie';
+      const slug = linkM[2].trim();
+      const id = sanitizeId(slug, 'vpo');
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const titleM = block.match(/alt="([^"]+)"/i) || block.match(/<h3[^>]*>([\s\S]*?)<\/h3>/i);
+      const poster = extractPoster(block, 'https://ver-peliculas-online.net');
+      items.push({ id, ref: 'vpo:' + type + ':' + slug, title: cleanText(titleM ? titleM[1] : '') || slugToTitle(slug), kind: type, poster, badges: ['HD'] });
     }
     return items;
   },
@@ -647,8 +687,7 @@ registerSource({
       if (seen.has(id)) continue;
       seen.add(id);
       const block = r.text.slice(Math.max(0, m.index - 500), m.index + 500);
-      const imgM = /data-src="([^"]+)"|src="([^"]+)"/.exec(block);
-      const poster = imgM ? (imgM[1] || imgM[2]) : null;
+      const poster = extractPoster(block, 'https://www.hackstore.fo');
       items.push({ id, ref: 'hs:' + cat + ':' + slug, title: cleanText(m[3]) || slugToTitle(slug), kind: type, poster: poster || null });
     }
     return items;
@@ -668,8 +707,7 @@ registerSource({
       if (seen.has(id)) continue;
       seen.add(id);
       const block = r.text.slice(Math.max(0, m.index - 500), m.index + 500);
-      const imgM = /data-src="([^"]+)"|src="([^"]+)"/.exec(block);
-      const poster = imgM ? (imgM[1] || imgM[2]) : null;
+      const poster = extractPoster(block, 'https://www.hackstore.fo');
       const yearM = /\((\d{4})\)/.exec(m[3]);
       items.push({ id, ref: 'hs:' + cat + ':' + slug, title: cleanText(m[3]) || slugToTitle(slug), kind: type, poster: poster || null, year: yearM ? yearM[1] : null, badges: ['ESTRENO'] });
     }
@@ -1271,7 +1309,27 @@ registerSource({
       const id = sanitizeId(slug, 'ent');
       if (seen.has(id)) continue;
       seen.add(id);
-      items.push({ id, ref: 'ent:' + path, title: cleanText(m[4]) || slugToTitle(slug), kind: type, poster: m[3] || null });
+      const poster = extractPoster(m[0], 'https://entrepeliculasyseries.nz') || m[3];
+      items.push({ id, ref: 'ent:' + path, title: cleanText(m[4]) || slugToTitle(slug), kind: type, poster: poster || null });
+    }
+    return items;
+  },
+  async home() {
+    const r = await fetchText('https://entrepeliculasyseries.nz/');
+    if (!r.ok) return [];
+    const items = [];
+    const seen = new Set();
+    const re = /<article class="post[^"]*">\s*<a href="(\/(?:pelicula|serie)\/([^"\/]+))">\s*<figure[^>]*>\s*<img src="([^"]+)"[^>]*alt="([^"]*)"/g;
+    let m;
+    while ((m = re.exec(r.text)) !== null) {
+      const path = m[1];
+      const slug = m[2];
+      const type = path.startsWith('/serie/') ? 'series' : 'movie';
+      const id = sanitizeId(slug, 'ent');
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const poster = extractPoster(m[0], 'https://entrepeliculasyseries.nz') || m[3];
+      items.push({ id, ref: 'ent:' + path, title: cleanText(m[4]) || slugToTitle(slug), kind: type, poster: poster || null, badges: ['LATINO'] });
     }
     return items;
   },
@@ -1558,6 +1616,15 @@ registerSource({
       return { id, ref: 'n79:' + type + ':' + x.tmdbId, title: cleanText(x.title) || slugToTitle(String(x.tmdbId)), kind: type, poster: x.poster || null, year: x.year ? String(x.year) : null, overview: cleanText(x.overview || ''), rating: x.rating ? Math.round(x.rating * 10) / 10 : null };
     }).filter((x) => x.ref);
   },
+  async home() {
+    const j = await fetchJson('https://net79.cc/api/catalog/search?q=a');
+    if (!j || !Array.isArray(j.items)) return [];
+    return j.items.slice(0, 30).map((x) => {
+      const type = x.type === 'tv' ? 'series' : 'movie';
+      const id = sanitizeId(String(x.tmdbId), 'n79');
+      return { id, ref: 'n79:' + type + ':' + x.tmdbId, title: cleanText(x.title) || slugToTitle(String(x.tmdbId)), kind: type, poster: x.poster || null, year: x.year ? String(x.year) : null, badges: ['FULL HD'] };
+    }).filter((x) => x.ref);
+  },
   async episodes(path) {
     const [type, tmdbId] = path.split(':');
     if (type !== 'series') return { episodes: [] };
@@ -1661,30 +1728,53 @@ registerSource({
   label: 'PelisPlusHD',
   kind: 'movie',
   async search(q) {
-    const r = await fetchText('https://www.pelisplushd.la/search?s=' + encodeURIComponent(q));
+    const r = await fetchText('https://pelisplushd.la/search?s=' + encodeURIComponent(q));
     if (!r.ok) return [];
     const items = [];
     const seen = new Set();
-    // Match both absolute (https://www.pelisplushd.la/...) and relative (/pelicula/... or /serie/...) hrefs
-    const re = /href="(?:https:\/\/www\.pelisplushd\.la)?(\/(?:pelicula|serie|pelicula-animada|serie-animada)\/[^"\/]+\/)"/g;
+    const re = /href="(?:https:\/\/pelisplushd\.la)?(\/(?:pelicula|serie|pelicula-animada|serie-animada)\/[^"\/]+(?:\/)?)"/g;
     let m;
     while ((m = re.exec(r.text)) !== null) {
-      const path = m[1];
+      let path = m[1];
+      if (!path.endsWith('/')) path += '/';
       const slug = path.split('/').filter(Boolean).pop();
       if (!isValidSlug(slug)) continue;
       const type = path.includes('/serie') ? 'series' : 'movie';
       const id = sanitizeId(slug, 'ppd');
       if (seen.has(id)) continue;
       seen.add(id);
-      const block = r.text.slice(Math.max(0, m.index - 400), m.index + 600);
-      const titleM = /alt="([^"]+)"/.exec(block);
-      const imgM = /src="([^"]+)"/.exec(block);
-      items.push({ id, ref: 'ppd:' + path, title: cleanText(titleM ? titleM[1] : '') || slugToTitle(slug), kind: type, poster: imgM ? imgM[1] : null });
+      const block = r.text.slice(Math.max(0, m.index - 200), m.index + 600);
+      const titleM = /alt="([^"]+)"/.exec(block) || /data-title="([^"]+)"/.exec(block);
+      const poster = extractPoster(block, 'https://pelisplushd.la');
+      items.push({ id, ref: 'ppd:' + path, title: cleanText(titleM ? titleM[1] : '') || slugToTitle(slug), kind: type, poster });
+    }
+    return items;
+  },
+  async home() {
+    const r = await fetchText('https://pelisplushd.la/');
+    if (!r.ok) return [];
+    const items = [];
+    const seen = new Set();
+    const re = /href="(?:https:\/\/pelisplushd\.la)?(\/(?:pelicula|serie|pelicula-animada|serie-animada)\/[^"\/]+(?:\/)?)"/g;
+    let m;
+    while ((m = re.exec(r.text)) !== null) {
+      let path = m[1];
+      if (!path.endsWith('/')) path += '/';
+      const slug = path.split('/').filter(Boolean).pop();
+      if (!isValidSlug(slug)) continue;
+      const type = path.includes('/serie') ? 'series' : 'movie';
+      const id = sanitizeId(slug, 'ppd');
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const block = r.text.slice(Math.max(0, m.index - 200), m.index + 600);
+      const titleM = /alt="([^"]+)"/.exec(block) || /data-title="([^"]+)"/.exec(block);
+      const poster = extractPoster(block, 'https://pelisplushd.la');
+      items.push({ id, ref: 'ppd:' + path, title: cleanText(titleM ? titleM[1] : '') || slugToTitle(slug), kind: type, poster, badges: ['HD'] });
     }
     return items;
   },
   async resolve(path) {
-    const url = 'https://www.pelisplushd.la' + path;
+    const url = 'https://pelisplushd.la' + path;
     const r = await fetchText(url);
     if (!r.ok) return null;
     const dataUrlM = /data-url="([^"]+)"/.exec(r.text);
@@ -1722,8 +1812,27 @@ registerSource({
       seen.add(id);
       const block = r.text.slice(Math.max(0, m.index - 600), m.index + 600);
       const titleM = /alt="([^"]+)"/.exec(block);
-      const imgM = /src="([^"]+)"/.exec(block);
-      items.push({ id, ref: '1mv:' + m[1], title: cleanText(titleM ? titleM[1] : '') || slugToTitle(slug), kind: 'movie', poster: imgM ? imgM[1] : null });
+      const poster = extractPoster(block, 'https://1movies.stream');
+      items.push({ id, ref: '1mv:' + m[1], title: cleanText(titleM ? titleM[1] : '') || slugToTitle(slug), kind: 'movie', poster });
+    }
+    return items;
+  },
+  async home() {
+    const r = await fetchText('https://1movies.stream/');
+    if (!r.ok) return [];
+    const items = [];
+    const seen = new Set();
+    const re = /<a[^>]+href="(https:\/\/1movies\.stream\/watch-movie\/([^"\/]+)\/)"/g;
+    let m;
+    while ((m = re.exec(r.text)) !== null) {
+      const slug = m[2].replace(/-watch-online$/, '');
+      const id = sanitizeId(slug, '1mv');
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const block = r.text.slice(Math.max(0, m.index - 600), m.index + 600);
+      const titleM = /alt="([^"]+)"/.exec(block);
+      const poster = extractPoster(block, 'https://1movies.stream');
+      items.push({ id, ref: '1mv:' + m[1], title: cleanText(titleM ? titleM[1] : '') || slugToTitle(slug), kind: 'movie', poster, badges: ['HD'] });
     }
     return items;
   },
@@ -1831,8 +1940,13 @@ export async function home() {
     { key: 'sl', id: 'sl-estrenos', title: '🎬 SoloLatino · Estrenos', genre: 'peliculas' },
     { key: 'cc', id: 'cc-peliculas', title: '🍿 CineCalidad · Películas', genre: 'peliculas' },
     { key: 'hs', id: 'hs-estrenos', title: '⚡ HackStore · Cartelera', genre: 'peliculas' },
+    { key: 'vpo', id: 'vpo-estrenos', title: '🌟 VerPelículasOnline · Novedades', genre: 'peliculas' },
     { key: 'pgh', id: 'pgh-cine', title: '🎥 PelisGratisHDs · Cine', genre: 'peliculas' },
+    { key: 'ppd', id: 'ppd-populares', title: '✨ PelisPlusHD · Tendencias', genre: 'peliculas' },
+    { key: 'ent', id: 'ent-estrenos', title: '💎 EntrePelículas · Destacados', genre: 'peliculas' },
     { key: 'cv', id: 'cv-series', title: '📺 CuevanaSerie · Series', genre: 'series' },
+    { key: 'n79', id: 'n79-top', title: '🏆 Net79 · Top TMDb', genre: 'peliculas' },
+    { key: '1mv', id: '1mv-cinema', title: '🌍 1Movies · Cinema', genre: 'peliculas' },
     { key: 'av1', id: 'av1-anime', title: '🔥 AnimeAV1 · Últimos', genre: 'anime' },
     { key: 'afv', id: 'afv-anime', title: '⭐ AnimeFLV · Populares', genre: 'anime' },
     { key: 'jkanime', id: 'jk-episodios', title: '🎯 JKAnime · Últimos episodios', genre: 'anime' }
@@ -1873,44 +1987,65 @@ export async function section(tab) {
   const rows = [];
 
   if (selectedTab === 'peliculas') {
-    const [rSl, rCc, rHs, rPgh] = await Promise.allSettled([
+    const [rSl, rCc, rHs, rVpo, rPgh, rPpd, rEnt, rN79, r1mv] = await Promise.allSettled([
       safeHome(SOURCES.sl),
       safeHome(SOURCES.cc),
       safeHome(SOURCES.hs),
-      safeHome(SOURCES.pgh)
+      safeHome(SOURCES.vpo),
+      safeHome(SOURCES.pgh),
+      safeHome(SOURCES.ppd),
+      safeHome(SOURCES.ent),
+      safeHome(SOURCES.n79),
+      safeHome(SOURCES['1mv'])
     ]);
-    const sl = rSl.status === 'fulfilled' ? rSl.value : [];
-    const moviesSl = sl.filter((x) => x.kind === 'movie');
-    if (moviesSl.length) rows.push({ id: 'sec-sl-movies', title: '🎬 SoloLatino · Películas', items: moviesSl.slice(0, 30), genre: 'peliculas' });
+    const sl = (rSl.status === 'fulfilled' ? rSl.value : []).filter((x) => x.kind === 'movie');
+    if (sl.length) rows.push({ id: 'sec-sl-movies', title: '🎬 SoloLatino · Películas', items: sl.slice(0, 30), genre: 'peliculas' });
 
-    const cc = rCc.status === 'fulfilled' ? rCc.value : [];
-    const moviesCc = cc.filter((x) => x.kind === 'movie');
-    if (moviesCc.length) rows.push({ id: 'sec-cc-movies', title: '🍿 CineCalidad · Novedades', items: moviesCc.slice(0, 30), genre: 'peliculas' });
+    const cc = (rCc.status === 'fulfilled' ? rCc.value : []).filter((x) => x.kind === 'movie');
+    if (cc.length) rows.push({ id: 'sec-cc-movies', title: '🍿 CineCalidad · Novedades', items: cc.slice(0, 30), genre: 'peliculas' });
 
-    const hs = rHs.status === 'fulfilled' ? rHs.value : [];
-    const moviesHs = hs.filter((x) => x.kind === 'movie');
-    if (moviesHs.length) rows.push({ id: 'sec-hs-movies', title: '⚡ HackStore · Cartelera', items: moviesHs.slice(0, 30), genre: 'peliculas' });
+    const hs = (rHs.status === 'fulfilled' ? rHs.value : []).filter((x) => x.kind === 'movie');
+    if (hs.length) rows.push({ id: 'sec-hs-movies', title: '⚡ HackStore · Cartelera', items: hs.slice(0, 30), genre: 'peliculas' });
 
-    const pgh = rPgh.status === 'fulfilled' ? rPgh.value : [];
-    const moviesPgh = pgh.filter((x) => x.kind === 'movie');
-    if (moviesPgh.length) rows.push({ id: 'sec-pgh-movies', title: '🎥 PelisGratisHDs · HD', items: moviesPgh.slice(0, 30), genre: 'peliculas' });
+    const vpo = (rVpo.status === 'fulfilled' ? rVpo.value : []).filter((x) => x.kind === 'movie');
+    if (vpo.length) rows.push({ id: 'sec-vpo-movies', title: '🌟 VerPelículasOnline · Estrenos', items: vpo.slice(0, 30), genre: 'peliculas' });
+
+    const pgh = (rPgh.status === 'fulfilled' ? rPgh.value : []).filter((x) => x.kind === 'movie');
+    if (pgh.length) rows.push({ id: 'sec-pgh-movies', title: '🎥 PelisGratisHDs · HD', items: pgh.slice(0, 30), genre: 'peliculas' });
+
+    const ppd = (rPpd.status === 'fulfilled' ? rPpd.value : []).filter((x) => x.kind === 'movie');
+    if (ppd.length) rows.push({ id: 'sec-ppd-movies', title: '✨ PelisPlusHD · Cine', items: ppd.slice(0, 30), genre: 'peliculas' });
+
+    const ent = (rEnt.status === 'fulfilled' ? rEnt.value : []).filter((x) => x.kind === 'movie');
+    if (ent.length) rows.push({ id: 'sec-ent-movies', title: '💎 EntrePelículas · Selección', items: ent.slice(0, 30), genre: 'peliculas' });
+
+    const n79 = (rN79.status === 'fulfilled' ? rN79.value : []).filter((x) => x.kind === 'movie');
+    if (n79.length) rows.push({ id: 'sec-n79-movies', title: '🏆 Net79 · Películas Populares', items: n79.slice(0, 30), genre: 'peliculas' });
+
+    const m1v = (r1mv.status === 'fulfilled' ? r1mv.value : []).filter((x) => x.kind === 'movie');
+    if (m1v.length) rows.push({ id: 'sec-1mv-movies', title: '🌍 1Movies · Global', items: m1v.slice(0, 30), genre: 'peliculas' });
   } else if (selectedTab === 'series') {
-    const [rCv, rSl, rPgh] = await Promise.allSettled([
+    const [rCv, rSl, rPgh, rEnt, rN79] = await Promise.allSettled([
       safeHome(SOURCES.cv),
       safeHome(SOURCES.sl),
-      safeHome(SOURCES.pgh)
+      safeHome(SOURCES.pgh),
+      safeHome(SOURCES.ent),
+      safeHome(SOURCES.n79)
     ]);
-    const cv = rCv.status === 'fulfilled' ? rCv.value : [];
-    const seriesCv = cv.filter((x) => x.kind === 'series');
-    if (seriesCv.length) rows.push({ id: 'sec-cv-series', title: '📺 CuevanaSerie · Populares', items: seriesCv.slice(0, 30), genre: 'series' });
+    const cv = (rCv.status === 'fulfilled' ? rCv.value : []).filter((x) => x.kind === 'series');
+    if (cv.length) rows.push({ id: 'sec-cv-series', title: '📺 CuevanaSerie · Populares', items: cv.slice(0, 30), genre: 'series' });
 
-    const sl = rSl.status === 'fulfilled' ? rSl.value : [];
-    const seriesSl = sl.filter((x) => x.kind === 'series');
-    if (seriesSl.length) rows.push({ id: 'sec-sl-series', title: '🔥 SoloLatino · Temporadas', items: seriesSl.slice(0, 30), genre: 'series' });
+    const sl = (rSl.status === 'fulfilled' ? rSl.value : []).filter((x) => x.kind === 'series');
+    if (sl.length) rows.push({ id: 'sec-sl-series', title: '🔥 SoloLatino · Temporadas', items: sl.slice(0, 30), genre: 'series' });
 
-    const pgh = rPgh.status === 'fulfilled' ? rPgh.value : [];
-    const seriesPgh = pgh.filter((x) => x.kind === 'series');
-    if (seriesPgh.length) rows.push({ id: 'sec-pgh-series', title: '✨ PelisGratisHDs · Series', items: seriesPgh.slice(0, 30), genre: 'series' });
+    const pgh = (rPgh.status === 'fulfilled' ? rPgh.value : []).filter((x) => x.kind === 'series');
+    if (pgh.length) rows.push({ id: 'sec-pgh-series', title: '✨ PelisGratisHDs · Series', items: pgh.slice(0, 30), genre: 'series' });
+
+    const ent = (rEnt.status === 'fulfilled' ? rEnt.value : []).filter((x) => x.kind === 'series');
+    if (ent.length) rows.push({ id: 'sec-ent-series', title: '💎 EntrePelículas · Capítulos', items: ent.slice(0, 30), genre: 'series' });
+
+    const n79 = (rN79.status === 'fulfilled' ? rN79.value : []).filter((x) => x.kind === 'series');
+    if (n79.length) rows.push({ id: 'sec-n79-series', title: '🏆 Net79 · Series Populares', items: n79.slice(0, 30), genre: 'series' });
   } else if (selectedTab === 'anime') {
     const [rAv1, rAfv, rJk] = await Promise.allSettled([
       safeHome(SOURCES.av1),
