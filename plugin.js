@@ -79,7 +79,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '3.0.7';
+const PLUGIN_VERSION = '3.0.8';
 
 function log(...args) {
   try {
@@ -285,6 +285,9 @@ async function resolveEmbedUrl(embedUrl, referer) {
     if (vo.ok) {
       const m3u = vo.text.match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
       if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA } };
+      // voe.sx JS-redirects to another domain — follow the redirect and resolve there
+      const redir = /(?:window\.location\.href|location\.href)\s*=\s*['"]([^'"]+)['"]/i.exec(vo.text);
+      if (redir && !redir[1].includes('voe.sx')) return resolveEmbedUrl(redir[1], u);
     }
     return null;
   }
@@ -404,7 +407,7 @@ registerSource({
       } catch {}
       if (!embed) return null;
       const st = await resolveEmbedUrl(embed, movieUrl);
-      return st && st.url ? { label: 'VPO ' + nume, ...st } : { label: 'VPO ' + nume, url: embed };
+      return (st && st.url) ? { label: 'VPO ' + nume, ...st } : null;
     });
 
     const settled = await Promise.allSettled(postTasks);
@@ -533,7 +536,7 @@ registerSource({
       const serverName = (s.server || 'Servidor').trim();
       const st = await resolveEmbedUrl(decoded, 'https://jkanime.net/');
       if (st && st.url) return { label: serverName + (s.size ? ' (' + s.size + ')' : ''), ...st };
-      return { label: serverName + (s.size ? ' (' + s.size + ')' : ''), url: decoded.trim() };
+      return null;
     });
 
     const settled = await Promise.allSettled(serverTasks);
@@ -643,14 +646,16 @@ registerSource({
       .filter((x) => x.status === 'fulfilled' && x.value && x.value.url)
       .map((x) => x.value);
 
-    if (streams.length === 0) return { url: opts[0], alternatives: opts.slice(1, 8).map((u, i) => ({ label: 'Servidor ' + (i + 2), url: u })) };
+    if (streams.length === 0) return null;
 
     streams.sort((a, b) => {
-      const aV = a.url.includes('vimeos');
-      const bV = b.url.includes('vimeos');
-      if (aV && !bV) return 1;
-      if (!aV && bV) return -1;
-      return 0;
+      const score = (u) => {
+        if (u.includes('goodstream.one')) return 20;
+        if (u.includes('vimeos.net') || u.includes('vimeos.zip')) return 10;
+        if (/\.mp4(\?|$)/i.test(u)) return 1;
+        return 5;
+      };
+      return score(a.url) - score(b.url);
     });
 
     const primary = streams[0];
@@ -735,19 +740,14 @@ registerSource({
       const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(p.text);
       const target = locM ? locM[1] : (iframeM ? iframeM[1] : null);
       if (!target) {
+        // Inline player — try packed JS extraction
         const unpacked = extractPackedJs(p.text);
         const m3u = (unpacked || p.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
-        return m3u ? { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } } : null;
+        if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': detailUrl } };
+        return null;
       }
-      const v = await fetchText(target, { Referer: playUrl });
-      if (v.ok) {
-        const unpacked = extractPackedJs(v.text);
-        const m3u = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
-        if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': target.startsWith('https://vimeos.net') ? 'https://vimeos.net/' : target } };
-        const mp4 = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
-        if (mp4) return { url: mp4[1], headers: { 'User-Agent': UA, 'Referer': target.startsWith('https://vimeos.net') ? 'https://vimeos.net/' : target } };
-      }
-      return null;
+      // Use resolveEmbedUrl: handles vimeos, videoapp.zip→vimeos, voe.sx redirect, etc.
+      return resolveEmbedUrl(target.startsWith('//') ? 'https:' + target : target, playUrl);
     }
 
     const settled = await Promise.allSettled(playMatches.map((pu) => resolvePlay(pu)));
@@ -760,11 +760,14 @@ registerSource({
     if (streams.length === 0) return null;
 
     streams.sort((a, b) => {
-      const aV = a.url.includes('vimeos');
-      const bV = b.url.includes('vimeos');
-      if (aV && !bV) return 1;
-      if (!aV && bV) return -1;
-      return 0;
+      // Score: lower is better. Deprioritize CDNs that block Android/ExoPlayer.
+      const score = (u) => {
+        if (u.includes('goodstream.one')) return 20;  // often times out
+        if (u.includes('vimeos.net') || u.includes('vimeos.zip')) return 10;  // needs Windows Chrome UA
+        if (/\.mp4(\?|$)/i.test(u)) return 1;  // direct MP4 is best
+        return 5;
+      };
+      return score(a.url) - score(b.url);
     });
 
     const primary = streams[0];
@@ -921,14 +924,8 @@ registerSource({
       if (urlM) embedUrl = urlM[1];
     }
     if (!embedUrl) return null;
-    const e = await fetchText(embedUrl, { Referer: detailUrl });
-    if (e.ok) {
-      const m3u = e.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-      if (m3u) return { url: m3u[1] };
-      const mp4 = e.text.match(/(https?:\/\/[^"'\s]+\.mp4[^"'\s]*)/i);
-      if (mp4) return { url: mp4[1] };
-    }
-    return { url: embedUrl };
+    const st = await resolveEmbedUrl(embedUrl, detailUrl);
+    return (st && st.url) ? st : null;
   }
 });
 
@@ -1012,14 +1009,10 @@ registerSource({
       try { j = JSON.parse(getText(res)); } catch { return null; }
       const embedUrl = j && j.url;
       if (!embedUrl || !String(embedUrl).startsWith('http')) return null;
-      const e = await fetchText(embedUrl, { Referer: url });
-      if (e.ok) {
-        const m3u = e.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-        if (m3u) return { label: o.label, url: m3u[1] };
-        const ifrM = /<iframe[^>]+src="([^"]+)"/i.exec(e.text);
-        if (ifrM) return { label: o.label, url: ifrM[1] };
-      }
-      return { label: o.label, url: embedUrl };
+      // Use resolveEmbedUrl: tries m3u8/mp4 extraction, follows inner iframes, handles vimeos/voe etc.
+      const st = await resolveEmbedUrl(embedUrl, url);
+      if (st && st.url) return { label: o.label, ...st };
+      return null;
     }
 
     const settled = await Promise.allSettled(opts.map((o) => resolveOpt(o)));
@@ -1147,7 +1140,7 @@ registerSource({
         ...(resolved.length > 1 ? { alternatives: resolved.slice(1, 7).map((s) => ({ label: s.label, url: s.url, ...(s.headers ? { headers: s.headers } : {}) })) } : {})
       };
     }
-    return { url: opts[0].url, alternatives: opts.slice(1, 6).map((x) => ({ label: x.label, url: x.url })) };
+    return null;
   }
 
 });
@@ -1231,20 +1224,30 @@ registerSource({
     const r = await fetchText(ver, { Referer: base });
     if (r.ok) {
       const srcM = /player\.src\(\{\s*src:\s*['"]([^'"]+)['"]/i.exec(r.text) || /src:\s*['"](https?:\/\/[^'"]+)['"]/i.exec(r.text);
-      if (srcM) return { url: srcM[1] };
-      const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(r.text);
-      if (iframeM) return { url: iframeM[1] };
+      if (srcM && /\.(m3u8|mp4)($|\?)/i.test(srcM[1])) return { url: srcM[1] };
       const m3u = r.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
       if (m3u) return { url: m3u[1] };
+      const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(r.text);
+      if (iframeM) {
+        const st = await resolveEmbedUrl(iframeM[1], ver);
+        if (st && st.url) return st;
+      }
     }
     const d = await fetchText(base);
     if (!d.ok) return null;
-    const iframe2 = /<iframe[^>]+src="([^"]+)"/i.exec(d.text);
-    if (iframe2) return { url: iframe2[1] };
-    const playM = /data-url="([^"]+)"/.exec(d.text);
-    if (playM) return { url: playM[1] };
     const m3u2 = d.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-    return m3u2 ? { url: m3u2[1] } : null;
+    if (m3u2) return { url: m3u2[1] };
+    const iframe2 = /<iframe[^>]+src="([^"]+)"/i.exec(d.text);
+    if (iframe2) {
+      const st = await resolveEmbedUrl(iframe2[1], base);
+      if (st && st.url) return st;
+    }
+    const playM = /data-url="([^"]+)"/.exec(d.text);
+    if (playM) {
+      const st = await resolveEmbedUrl(playM[1], base);
+      if (st && st.url) return st;
+    }
+    return null;
   }
 });
 
@@ -1354,10 +1357,13 @@ registerSource({
     const url = 'https://entrepeliculasyseries.nz' + path;
     const r = await fetchText(url);
     if (!r.ok) return null;
-    const iframes = [...r.text.matchAll(/<iframe[^>]+src="([^"]+)"/gi)].map((x) => x[1]);
-    for (let ifr of iframes) {
-      if (ifr.startsWith('//')) ifr = 'https:' + ifr;
-      if (ifr.startsWith('http') && !ifr.includes('youtube.com')) return { url: ifr };
+    const iframes = [...r.text.matchAll(/<iframe[^>]+src="([^"]+)"/gi)]
+      .map((x) => (x[1].startsWith('//') ? 'https:' + x[1] : x[1]))
+      .filter((ifr) => ifr.startsWith('http') && !ifr.includes('youtube.com'));
+    if (iframes.length > 0) {
+      const resolved = await Promise.all(iframes.slice(0, 4).map((ifr) => resolveEmbedUrl(ifr, url)));
+      const valid = resolved.find((st) => st && st.url);
+      if (valid) return valid;
     }
     const vidM = /\/vidurl\/([^"\/]+)/.exec(r.text);
     if (vidM) {
@@ -1365,10 +1371,13 @@ registerSource({
       if (v.ok) {
         const m3u = v.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
         if (m3u) return { url: m3u[1] };
-        const iframes2 = [...v.text.matchAll(/<iframe[^>]+src="([^"]+)"/gi)].map((x) => x[1]);
-        for (let ifr of iframes2) {
-          if (ifr.startsWith('//')) ifr = 'https:' + ifr;
-          if (ifr.startsWith('http') && !ifr.includes('youtube.com')) return { url: ifr };
+        const iframes2 = [...v.text.matchAll(/<iframe[^>]+src="([^"]+)"/gi)]
+          .map((x) => (x[1].startsWith('//') ? 'https:' + x[1] : x[1]))
+          .filter((ifr) => ifr.startsWith('http') && !ifr.includes('youtube.com'));
+        if (iframes2.length > 0) {
+          const resolved2 = await Promise.all(iframes2.slice(0, 4).map((ifr) => resolveEmbedUrl(ifr, url)));
+          const valid2 = resolved2.find((st) => st && st.url);
+          if (valid2) return valid2;
         }
       }
     }
@@ -1592,7 +1601,7 @@ registerSource({
       if (m3u) return { label: s.label, url: m3u[1] };
       const mp4 = r.text.match(/(https?:\/\/[^"'\s]+\.mp4[^"'\s]*)/i);
       if (mp4) return { label: s.label, url: mp4[1] };
-      return { label: s.label, url: s.url };
+      return null;  // Never return a raw embed page as a stream
     }
 
     const settled = await Promise.allSettled(toResolve.map((s) => resolveAfvServer(s)));
@@ -1688,7 +1697,10 @@ registerSource({
     const pageUrl = 'https://onlyflix.to/' + (type === 'series' ? 'tv' : 'movie') + '/' + id + '/';
     // Try REST meta first (fast path)
     const j = await fetchJson('https://onlyflix.to/wp-json/wp/v2/' + (type === 'series' ? 'tv' : 'movies') + '/' + id);
-    if (j && j.meta && j.meta.embed) return { url: j.meta.embed };
+    if (j && j.meta && j.meta.embed) {
+      const st = await resolveEmbedUrl(j.meta.embed, pageUrl);
+      if (st && st.url) return st;
+    }
     const r = await fetchText(pageUrl);
     if (!r.ok) return null;
     // Extract nonce + post_id for AJAX player list
@@ -1704,19 +1716,25 @@ registerSource({
           const players = pj && pj.data ? (Array.isArray(pj.data) ? pj.data : Object.values(pj.data)) : [];
           const urls = players.map((p) => p.url || p.link || p).filter((u) => typeof u === 'string' && u.startsWith('http'));
           if (urls.length > 0) {
-            return {
-              url: urls[0],
-              ...(urls.length > 1 ? { alternatives: urls.slice(1, 6).map((u, i) => ({ label: 'Servidor ' + (i + 2), url: u })) } : {})
-            };
+            const resolved = await Promise.all(urls.slice(0, 4).map((u) => resolveEmbedUrl(u, pageUrl)));
+            const valid = resolved.filter((st) => st && st.url);
+            if (valid.length > 0) {
+              return {
+                url: valid[0].url,
+                ...(valid[0].headers ? { headers: valid[0].headers } : {}),
+                ...(valid.length > 1 ? { alternatives: valid.slice(1, 6).map((s, i) => ({ label: 'Servidor ' + (i + 2), url: s.url, ...(s.headers ? { headers: s.headers } : {}) })) } : {})
+              };
+            }
           }
         } catch {}
-        const urlsRaw = [...txt.matchAll(/(https?:\/\/[^"'\s\\]+)/g)].map((m) => m[1]).filter((u) => !u.includes('youtube'));
-        if (urlsRaw.length > 0) return { url: urlsRaw[0] };
       }
     }
     // Fallback: first non-youtube iframe
     const iframes = [...r.text.matchAll(/<iframe[^>]+src="([^"]+)"/gi)].map((m) => m[1]).filter((u) => !u.includes('youtube'));
-    if (iframes.length > 0) return { url: iframes[0] };
+    for (const ifr of iframes.slice(0, 3)) {
+      const st = await resolveEmbedUrl(ifr.startsWith('//') ? 'https:' + ifr : ifr, pageUrl);
+      if (st && st.url) return st;
+    }
     const m3u = r.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
     return m3u ? { url: m3u[1] } : null;
   }
@@ -1779,17 +1797,17 @@ registerSource({
     if (!r.ok) return null;
     const dataUrlM = /data-url="([^"]+)"/.exec(r.text);
     if (dataUrlM) {
-      const e = await fetchText(dataUrlM[1], { Referer: url });
-      if (e.ok) {
-        const m3u = e.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-        if (m3u) return { url: m3u[1] };
-      }
-      return { url: dataUrlM[1] };
+      const st = await resolveEmbedUrl(dataUrlM[1], url);
+      if (st && st.url) return st;
     }
-    const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(r.text);
-    if (iframeM) return { url: iframeM[1] };
     const m3u = r.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-    return m3u ? { url: m3u[1] } : null;
+    if (m3u) return { url: m3u[1] };
+    const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(r.text);
+    if (iframeM) {
+      const st = await resolveEmbedUrl(iframeM[1], url);
+      if (st && st.url) return st;
+    }
+    return null;
   }
 });
 
@@ -1852,12 +1870,16 @@ registerSource({
           if (Array.isArray(servers) && servers.length > 0) {
             const valid = servers.filter((s) => s && (s.link || s.url));
             if (valid.length > 0) {
-              const primary = valid[0];
-              const primaryUrl = primary.link || primary.url;
-              return {
-                url: primaryUrl,
-                ...(valid.length > 1 ? { alternatives: valid.slice(1, 6).map((s) => ({ label: s.name || 'Servidor', url: s.link || s.url })) } : {})
-              };
+              const urls = valid.map((s) => s.link || s.url).filter((u) => typeof u === 'string' && u.startsWith('http'));
+              const resolved = await Promise.all(urls.slice(0, 4).map((u) => resolveEmbedUrl(u, url)));
+              const okStreams = resolved.filter((st) => st && st.url);
+              if (okStreams.length > 0) {
+                return {
+                  url: okStreams[0].url,
+                  ...(okStreams[0].headers ? { headers: okStreams[0].headers } : {}),
+                  ...(okStreams.length > 1 ? { alternatives: okStreams.slice(1, 6).map((s, i) => ({ label: 'Servidor ' + (i + 2), url: s.url, ...(s.headers ? { headers: s.headers } : {}) })) } : {})
+                };
+              }
             }
           }
         } catch {}
@@ -1868,12 +1890,8 @@ registerSource({
     // Fallback: static iframe or m3u8 in page
     const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(r.text);
     if (iframeM) {
-      const e = await fetchText(iframeM[1], { Referer: url });
-      if (e.ok) {
-        const m3u = e.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-        if (m3u) return { url: m3u[1] };
-      }
-      return { url: iframeM[1] };
+      const st = await resolveEmbedUrl(iframeM[1], url);
+      if (st && st.url) return st;
     }
     const m3u = r.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
     return m3u ? { url: m3u[1] } : null;
@@ -1967,9 +1985,11 @@ export async function home() {
   return rows;
 }
 
-export async function section(tab) {
+export async function section(param) {
   await kino.sleep(0);
-  const selectedTab = typeof tab === 'string' && tab ? tab : 'peliculas';
+  let selectedTab = 'peliculas';
+  if (typeof param === 'string' && param) selectedTab = param;
+  else if (param && typeof param.tab === 'string' && param.tab) selectedTab = param.tab;
   log(`[section] opening tab: ${selectedTab}`);
 
   const tabs = [
