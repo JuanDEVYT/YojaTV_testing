@@ -61,7 +61,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '3.0.2';
+const PLUGIN_VERSION = '3.0.3';
 
 function log(...args) {
   try {
@@ -76,7 +76,7 @@ function log(...args) {
   } catch {}
 }
 
-log(`Iniciando plugin YojaTV v${PLUGIN_VERSION}`);
+log(`Iniciando plugin YojaTV v${PLUGIN_VERSION} - Por JuandreXter, YojanderGaming y einer_bg`);
 
 async function fetchText(url, headers) {
   log(`[HTTP GET] -> ${url}`);
@@ -438,9 +438,13 @@ registerSource({
     return { episodes };
   },
   async resolve(path) {
-    // path is a full episode/movie URL stored as ref, or "movie:<slug>"
     let url = path;
-    if (!url.startsWith('http')) url = 'https://www.cinecalidad.am/ver-pelicula/' + path.split(':').pop() + '/';
+    if (!url.startsWith('http')) {
+      const parts = path.split(':');
+      const type = parts.length > 1 ? parts[0] : 'movie';
+      const slug = parts.pop();
+      url = 'https://www.cinecalidad.am/' + (type === 'series' ? 'ver-serie/' : 'ver-pelicula/') + slug + '/';
+    }
     const r = await fetchText(url);
     if (!r.ok) return null;
     const opts = [];
@@ -448,7 +452,39 @@ registerSource({
     let om;
     while ((om = optRe.exec(r.text)) !== null) opts.push(om[1]);
     if (opts.length === 0) return null;
-    return { url: opts[0], alternatives: opts.slice(1, 8).map((u, i) => ({ label: 'Servidor ' + (i + 2), url: u })) };
+
+    const streams = [];
+    for (const opt of opts) {
+      try {
+        if (opt.includes('vimeos.net')) {
+          const v = await fetchText(opt, { Referer: url });
+          if (v.ok) {
+            const unpacked = extractPackedJs(v.text);
+            const m3u = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
+            if (m3u) streams.push({ url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } });
+            const mp4 = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
+            if (mp4) streams.push({ url: mp4[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } });
+          }
+        } else if (/\.(m3u8|mp4)($|\?)/i.test(opt)) {
+          streams.push({ url: opt, headers: { 'User-Agent': UA } });
+        } else {
+          streams.push({ url: opt, headers: { 'User-Agent': UA } });
+        }
+      } catch (err) {}
+    }
+    if (streams.length === 0) return { url: opts[0], alternatives: opts.slice(1, 8).map((u, i) => ({ label: 'Servidor ' + (i + 2), url: u })) };
+
+    const primary = streams[0];
+    const alts = streams.slice(1, 8).map((st, i) => ({
+      label: 'Servidor ' + (i + 2),
+      url: st.url,
+      ...(st.headers ? { headers: st.headers } : {})
+    }));
+    return {
+      url: primary.url,
+      ...(primary.headers ? { headers: primary.headers } : {}),
+      ...(alts.length > 0 ? { alternatives: alts } : {})
+    };
   }
 });
 
@@ -505,39 +541,60 @@ registerSource({
     const detailUrl = 'https://www.hackstore.fo/' + cat + '/' + slug + '/';
     const r = await fetchText(detailUrl);
     if (!r.ok) return null;
-    const playM = /play\.php\?u=([^&"'\s]+)&b=([^&"'\s]+)/.exec(r.text);
-    if (!playM) return null;
-    const playUrl = 'https://www.hackstore.fo/play.php?u=' + playM[1] + '&b=' + playM[2];
-    const p = await fetchText(playUrl, { Referer: detailUrl });
-    if (!p.ok) return null;
-    const locM = /location\.href\s*=\s*['"]([^'"]+)['"]/i.exec(p.text);
-    if (locM && locM[1]) {
-      const target = locM[1];
+
+    const playMatches = [];
+    const playRe = /play\.php\?u=([^&"'\s<>]+)&b=([^&"'\s<>]+)/g;
+    let pm;
+    while ((pm = playRe.exec(r.text)) !== null) {
+      const u = 'https://www.hackstore.fo/play.php?u=' + pm[1] + '&b=' + pm[2];
+      if (!playMatches.includes(u)) playMatches.push(u);
+    }
+    if (playMatches.length === 0) return null;
+
+    async function resolvePlay(playUrl) {
+      const p = await fetchText(playUrl, { Referer: detailUrl });
+      if (!p.ok) return null;
+      const locM = /location\.href\s*=\s*['"]([^'"]+)['"]/i.exec(p.text);
+      const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(p.text);
+      const target = locM ? locM[1] : (iframeM ? iframeM[1] : null);
+      if (!target) {
+        const unpacked = extractPackedJs(p.text);
+        const m3u = (unpacked || p.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
+        return m3u ? { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } } : null;
+      }
       const v = await fetchText(target, { Referer: playUrl });
       if (v.ok) {
         const unpacked = extractPackedJs(v.text);
         const m3u = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
-        if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
+        if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': target.startsWith('https://vimeos.net') ? 'https://vimeos.net/' : target } };
         const mp4 = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
-        if (mp4) return { url: mp4[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
+        if (mp4) return { url: mp4[1], headers: { 'User-Agent': UA, 'Referer': target.startsWith('https://vimeos.net') ? 'https://vimeos.net/' : target } };
       }
-      return { url: target, headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
+      return null;
     }
-    const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(p.text);
-    if (iframeM) {
-      const emb = await fetchText(iframeM[1], { Referer: playUrl });
-      if (emb.ok) {
-        const unpacked = extractPackedJs(emb.text);
-        const m3u = (unpacked || emb.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
-        if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
-        const mp4 = (unpacked || emb.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
-        if (mp4) return { url: mp4[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
-      }
-      return { url: iframeM[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
+
+    const streams = [];
+    for (const pu of playMatches) {
+      try {
+        const st = await resolvePlay(pu);
+        if (st && st.url && !streams.some((x) => x.url === st.url)) {
+          streams.push(st);
+        }
+      } catch (err) {}
     }
-    const unpacked = extractPackedJs(p.text);
-    const m3u = (unpacked || p.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
-    return m3u ? { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } } : null;
+    if (streams.length === 0) return null;
+
+    const primary = streams[0];
+    const alts = streams.slice(1, 8).map((st, i) => ({
+      label: 'Servidor ' + (i + 2),
+      url: st.url,
+      ...(st.headers ? { headers: st.headers } : {})
+    }));
+    return {
+      url: primary.url,
+      ...(primary.headers ? { headers: primary.headers } : {}),
+      ...(alts.length > 0 ? { alternatives: alts } : {})
+    };
   }
 });
 
