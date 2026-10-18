@@ -79,7 +79,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '3.0.9';
+const PLUGIN_VERSION = '5.0.0';
 
 function log(...args) {
   try {
