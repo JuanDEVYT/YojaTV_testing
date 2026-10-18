@@ -11,6 +11,49 @@
   "streamHosts": "any",
   "debug": true,
   "telemetry": "verbose",
+  "settings": [
+    {
+      "key": "tmdbKey",
+      "label": "API Key de TMDB",
+      "type": "password",
+      "hint": "Gratis en themoviedb.org ▸ Settings ▸ API"
+    },
+    {
+      "key": "tmdbLang",
+      "label": "Idioma del catálogo",
+      "type": "select",
+      "default": "es-MX",
+      "options": [
+        {
+          "value": "es-MX",
+          "label": "Español (Latinoamérica)"
+        },
+        {
+          "value": "es-ES",
+          "label": "Español (España)"
+        },
+        {
+          "value": "en-US",
+          "label": "English"
+        },
+        {
+          "value": "pt-BR",
+          "label": "Português"
+        }
+      ]
+    },
+    {
+      "key": "sourceRows",
+      "label": "Filas de las fuentes",
+      "type": "toggle",
+      "default": true
+    },
+    {
+      "key": "estado",
+      "label": "Estado",
+      "type": "status"
+    }
+  ],
   "section": {
     "label": "YojaTV"
   },
@@ -82,6 +125,7 @@
     "service-channels.clusters.pluto.tv",
     "cfd-v4-service-channel-stitcher-use1-1.prd.pluto.tv",
     "image.tmdb.org",
+    "api.themoviedb.org",
     "mediafire.com",
     "www.mediafire.com",
     "mp4upload.com",
@@ -169,6 +213,6 @@
   "icon": "icon.png",
   "signature": {
     "authorKey": "c3caf0f9e51197553082904a2655d51e5afcca579a3048cdfbd8a97f7b2cf2c3",
-    "value": "3d9522959e1a85f260cd22c53dd0dd8f1fd8f328a00bb1f7358167b5ec40816053e0c76940d344d3878613f3990e1eda6b1c79c831f2fb0661f33a891179b005"
+    "value": "54b5e41de247763737c14a50bf1b98f9228a22a5a7d3dc8b60b5519e48888a7545af9f228f56794efad55e80c907a937dc9da409d0a3861f431583dd3a0f9c0a"
   }
 }

@@ -236,12 +236,42 @@ async function extractMp4upload(embedUrl) {
   return m ? m[1] : null;
 }
 
+function decodeVoePayload(ct, luts) {
+  try {
+    const rawLuts = luts.slice(2, -2).split("','");
+    let txt = '';
+    for (let i = 0; i < ct.length; i++) {
+      let x = ct.charCodeAt(i);
+      if (x > 64 && x < 91) {
+        x = ((x - 52) % 26) + 65;
+      } else if (x > 96 && x < 123) {
+        x = ((x - 84) % 26) + 97;
+      }
+      txt += String.fromCharCode(x);
+    }
+    for (const lut of rawLuts) {
+      txt = txt.split(lut).join('');
+    }
+    const b64_1 = atob(txt);
+    let shifted = '';
+    for (let i = 0; i < b64_1.length; i++) {
+      shifted += String.fromCharCode(b64_1.charCodeAt(i) - 3);
+    }
+    const reversed = shifted.split('').reverse().join('');
+    const finalJson = atob(reversed);
+    return JSON.parse(finalJson);
+  } catch (e) {
+    return null;
+  }
+}
+
 async function resolveEmbedUrl(embedUrl, referer) {
   if (!embedUrl || typeof embedUrl !== 'string') return null;
   let u = embedUrl.trim();
   if (u.startsWith('//')) u = 'https:' + u;
   if (!u.startsWith('http')) return null;
   if (u.includes('youtube.com') || u.includes('youtu.be')) return null;
+  if (u.includes('bigbuckbunny') || u.includes('test-videos.co.uk')) return null;
 
   if (u.includes('player.zilla-networks.com')) {
     const directZilla = u.replace('/play/', '/m3u8/');
@@ -259,7 +289,9 @@ async function resolveEmbedUrl(embedUrl, referer) {
       const m3u = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
       if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
       const mp4 = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
-      if (mp4) return { url: mp4[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
+      if (mp4 && !mp4[1].includes('bigbuckbunny') && !mp4[1].includes('test-videos')) {
+        return { url: mp4[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
+      }
     }
     return null;
   }
@@ -271,7 +303,9 @@ async function resolveEmbedUrl(embedUrl, referer) {
       const m3u = (unpacked || g.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
       if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://goodstream.one/' } };
       const mp4 = (unpacked || g.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
-      if (mp4) return { url: mp4[1], headers: { 'User-Agent': UA, 'Referer': 'https://goodstream.one/' } };
+      if (mp4 && !mp4[1].includes('bigbuckbunny') && !mp4[1].includes('test-videos')) {
+        return { url: mp4[1], headers: { 'User-Agent': UA, 'Referer': 'https://goodstream.one/' } };
+      }
     }
     return null;
   }
@@ -285,14 +319,39 @@ async function resolveEmbedUrl(embedUrl, referer) {
     return null;
   }
 
-  if (u.includes('voe.sx')) {
+  if (u.includes('voe.sx') || u.includes('megankiddifference.com') || u.includes('chaliceguzzlerlandlord.com')) {
     const vo = await fetchText(u, { Referer: referer });
     if (vo.ok) {
+      // 1. Check for VOE's encrypted JSON payload + loader script
+      const payloadM = vo.text.match(/json">\["([^"]+)"]<\/script>\s*<script\s*src="([^"]+)/);
+      if (payloadM) {
+        let scriptUrl = payloadM[2];
+        if (scriptUrl.startsWith('//')) scriptUrl = 'https:' + scriptUrl;
+        else if (scriptUrl.startsWith('/')) {
+          try {
+            const origin = new URL(u).origin;
+            scriptUrl = origin + scriptUrl;
+          } catch {
+            scriptUrl = 'https://megankiddifference.com' + scriptUrl;
+          }
+        }
+        const sRes = await fetchText(scriptUrl, { Referer: u });
+        if (sRes.ok) {
+          const lutsM = sRes.text.match(/(\[(?:'\W{2}'[,\]]){1,9})/);
+          if (lutsM) {
+            const decoded = decodeVoePayload(payloadM[1], lutsM[1]);
+            if (decoded && decoded.source && !decoded.source.includes('bigbuckbunny') && !decoded.source.includes('test-videos')) {
+              return { url: decoded.source, headers: { 'User-Agent': UA, Referer: u } };
+            }
+          }
+        }
+      }
+      // 2. Direct HLS
       const m3u = vo.text.match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
-      if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA } };
-      // voe.sx JS-redirects to another domain — follow the redirect and resolve there
+      if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, Referer: u } };
+      // 3. JS-redirect follow
       const redir = /(?:window\.location\.href|location\.href)\s*=\s*['"]([^'"]+)['"]/i.exec(vo.text);
-      if (redir && !redir[1].includes('voe.sx')) return resolveEmbedUrl(redir[1], u);
+      if (redir && !redir[1].includes('voe.sx') && !redir[1].includes(u)) return resolveEmbedUrl(redir[1], u);
     }
     return null;
   }
@@ -343,11 +402,33 @@ async function resolveEmbedUrl(embedUrl, referer) {
   try {
     const gen = await fetchText(u, { Referer: referer });
     if (gen.ok) {
+      // Check for VOE pattern on unbranded mirror
+      const payloadM = gen.text.match(/json">\["([^"]+)"]<\/script>\s*<script\s*src="([^"]+)/);
+      if (payloadM) {
+        let scriptUrl = payloadM[2];
+        if (scriptUrl.startsWith('//')) scriptUrl = 'https:' + scriptUrl;
+        else if (scriptUrl.startsWith('/')) {
+          try { scriptUrl = new URL(u).origin + scriptUrl; } catch {}
+        }
+        const sRes = await fetchText(scriptUrl, { Referer: u });
+        if (sRes.ok) {
+          const lutsM = sRes.text.match(/(\[(?:'\W{2}'[,\]]){1,9})/);
+          if (lutsM) {
+            const decoded = decodeVoePayload(payloadM[1], lutsM[1]);
+            if (decoded && decoded.source && !decoded.source.includes('bigbuckbunny') && !decoded.source.includes('test-videos')) {
+              return { url: decoded.source, headers: { 'User-Agent': UA, Referer: u } };
+            }
+          }
+        }
+      }
+
       const unpacked = extractPackedJs(gen.text);
       const m3u = (unpacked || gen.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
       if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, ...(referer ? { Referer: referer } : {}) } };
       const mp4 = (unpacked || gen.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
-      if (mp4) return { url: mp4[1], headers: { 'User-Agent': UA, ...(referer ? { Referer: referer } : {}) } };
+      if (mp4 && !mp4[1].includes('bigbuckbunny') && !mp4[1].includes('test-videos')) {
+        return { url: mp4[1], headers: { 'User-Agent': UA, ...(referer ? { Referer: referer } : {}) } };
+      }
       const ifr = /<iframe[^>]+src="([^"]+)"/i.exec(gen.text);
       if (ifr && !ifr[1].includes(u)) return resolveEmbedUrl(ifr[1], u);
     }
@@ -1933,6 +2014,229 @@ registerSource({
   }
 });
 
+/* ---------- TMDB catalog ---------- */
+
+const TMDB_API = 'https://api.themoviedb.org/3';
+const TMDB_IMG = 'https://image.tmdb.org/t/p';
+const TMDB_CACHE_MS = 6 * 60 * 60 * 1000;
+const TMDB_TIMEOUT_MS = 8000;
+
+const TMDB_MOVIE_SRCS = ['cc', 'pgh', 'cv', 'sl', 'hs', 'chp', 'chx', 'ent', 'n79', 'ppd', 'ofx', '1mv', 'vpo'];
+const TMDB_SERIES_SRCS = ['sl', 'cv', 'pgh', 'cc', 'ent', 'n79', 'chp', 'chx', 'hs', 'jkanime', 'av1', 'afv'];
+
+function tmdbKey() {
+  try { const k = kino.config.get('tmdbKey'); return typeof k === 'string' ? k.trim() : ''; } catch { return ''; }
+}
+
+function tmdbLang() {
+  try { const l = kino.config.get('tmdbLang'); return typeof l === 'string' && l ? l : 'es-MX'; } catch { return 'es-MX'; }
+}
+
+function tmdbWantSourceRows() {
+  try { const v = kino.config.get('sourceRows'); return v === undefined ? true : !!v; } catch { return true; }
+}
+
+function tmdbCached(cacheKey) {
+  try {
+    const raw = kino.storage.get(cacheKey);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (!o || typeof o.t !== 'number' || Date.now() - o.t > TMDB_CACHE_MS) return null;
+    return o.v;
+  } catch { return null; }
+}
+
+function tmdbStore(cacheKey, v) {
+  try { kino.storage.set(cacheKey, JSON.stringify({ t: Date.now(), v }), { ttlMs: TMDB_CACHE_MS }); } catch {}
+}
+
+async function tmdbFetch(path, params) {
+  if (!tmdbKey()) return null;
+  const cacheKey = 'tmdb:' + path + ':' + JSON.stringify(params || {});
+  const hit = tmdbCached(cacheKey);
+  if (hit) return hit;
+  const qs = ['api_key=' + encodeURIComponent(tmdbKey()), 'language=' + encodeURIComponent(tmdbLang())];
+  if (params) {
+    for (const k in params) {
+      const v = params[k];
+      if (v === undefined || v === null || v === '') continue;
+      qs.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v)));
+    }
+  }
+  const url = TMDB_API + path + '?' + qs.join('&');
+  const r = await Promise.race([
+    fetchJson(url, { Accept: 'application/json' }),
+    new Promise((res) => setTimeout(() => res(null), TMDB_TIMEOUT_MS))
+  ]);
+  return r || null;
+}
+
+function tmdbImage(p, size) {
+  return p ? TMDB_IMG + '/' + size + p : null;
+}
+
+function tmdbItem(x, kind) {
+  const title = cleanText(kind === 'series' ? (x.name || x.title || '') : (x.title || x.name || ''));
+  const date = x.release_date || x.first_air_date || '';
+  return {
+    id: sanitizeId('tmdb' + kind + x.id, 't'),
+    ref: 'tmdb:' + kind + ':' + x.id + ':' + encodeURIComponent(title),
+    title,
+    kind,
+    poster: tmdbImage(x.poster_path, 'w500'),
+    backdrop: tmdbImage(x.backdrop_path, 'w780'),
+    overview: cleanText(x.overview || ''),
+    year: date ? date.slice(0, 4) : null,
+    rating: x.vote_average ? Math.round(x.vote_average * 10) / 10 : null,
+    ids: { tmdb: x.id }
+  };
+}
+
+function tmdbRowsOf(j, kind) {
+  if (!j || !Array.isArray(j.results)) return [];
+  return j.results.filter((x) => x && x.id && !x.adult).map((x) => tmdbItem(x, kind));
+}
+
+async function tmdbHomeRows() {
+  if (!tmdbKey()) return [];
+  const rows = [];
+  const specs = [
+    { id: 'tmdb-trend-movies', title: '🔥 Tendencias de la semana · Películas', path: '/trending/movie/week', kind: 'movie', genre: 'peliculas' },
+    { id: 'tmdb-popular-series', title: '📺 Series populares', path: '/tv/popular', kind: 'series', genre: 'series' },
+    { id: 'tmdb-trend-anime', title: '⛩️ Anime en tendencia', path: '/discover/tv', kind: 'series', genre: 'anime', params: { with_genres: '16', sort_by: 'popularity.desc', 'with_original_language': 'ja' } },
+    { id: 'tmdb-now-playing', title: '🎬 En cartelera', path: '/movie/now_playing', kind: 'movie', genre: 'peliculas' },
+    { id: 'tmdb-top-series', title: '🏆 Mejor valoradas', path: '/tv/top_rated', kind: 'series', genre: 'series' },
+    { id: 'tmdb-upcoming', title: '📅 Próximos estrenos', path: '/movie/upcoming', kind: 'movie', genre: 'peliculas' }
+  ];
+  const settled = await Promise.allSettled(specs.map((s) => tmdbFetch(s.path, s.params)));
+  specs.forEach((s, i) => {
+    const j = settled[i].status === 'fulfilled' ? settled[i].value : null;
+    const items = tmdbRowsOf(j, s.kind);
+    log(`[home] tmdb ${s.id}: ${items.length} items`);
+    if (items.length) rows.push({ id: s.id, title: s.title, items: items.slice(0, 24), genre: s.genre });
+  });
+  return rows;
+}
+
+async function tmdbSearchIds(query) {
+  const j = await tmdbFetch('/search/multi', { query, include_adult: 'false' });
+  if (!j || !Array.isArray(j.results)) return [];
+  const out = [];
+  for (const x of j.results) {
+    if (!x || !x.id || x.media_type === 'person') continue;
+    out.push({ kind: x.media_type === 'tv' ? 'series' : 'movie', id: x.id, title: cleanText(x.name || x.title || ''), year: (x.release_date || x.first_air_date || '').slice(0, 4) });
+  }
+  return out;
+}
+
+function tmdbNormTitle(s) {
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+async function tmdbEnrich(items, query) {
+  if (!tmdbKey() || !items.length) return items;
+  let hits;
+  try { hits = await tmdbSearchIds(query); } catch { return items; }
+  if (!hits.length) return items;
+  const byTitle = {};
+  for (const h of hits) {
+    const k = tmdbNormTitle(h.title);
+    if (k && !byTitle[k]) byTitle[k] = h;
+  }
+  for (const it of items) {
+    if (it.ids && it.ids.tmdb) continue;
+    const h = byTitle[tmdbNormTitle(it.title)];
+    if (!h || h.kind !== it.kind) continue;
+    it.ids = { ...(it.ids || {}), tmdb: h.id };
+    if (!it.year && h.year) it.year = h.year;
+  }
+  return items;
+}
+
+async function tmdbCandidates(title, kind) {
+  const want = kind === 'series' ? 'series' : 'movie';
+  const ids = kind === 'series' ? TMDB_SERIES_SRCS : TMDB_MOVIE_SRCS;
+  const settled = await Promise.allSettled(ids.map((id) => safeSearch(SOURCES[id], title)));
+  const out = [];
+  const seen = new Set();
+  const target = tmdbNormTitle(title);
+  const scored = [];
+  for (let i = 0; i < settled.length; i++) {
+    const hits = settled[i].status === 'fulfilled' ? settled[i].value : [];
+    for (const h of hits) {
+      if (!h || !h.ref || h.kind !== want) continue;
+      const norm = tmdbNormTitle(h.title);
+      const score = norm === target ? 3 : (norm && target && (norm.includes(target) || target.includes(norm)) ? 2 : 1);
+      scored.push({ srcId: ids[i], ref: h.ref, score });
+    }
+  }
+  scored.sort((a, b) => b.score - a.score);
+  for (const s of scored) {
+    if (seen.has(s.ref)) continue;
+    seen.add(s.ref);
+    out.push(s);
+  }
+  log(`[tmdb] "${title}" (${want}): ${out.length} candidate(s)`);
+  return out;
+}
+
+function tmdbSplit(path) {
+  const i1 = path.indexOf(':');
+  if (i1 === -1) return { kind: path, id: '', title: '' };
+  const kind = path.slice(0, i1);
+  const rest = path.slice(i1 + 1);
+  const i2 = rest.indexOf(':');
+  if (i2 === -1) return { kind, id: rest, title: '' };
+  return { kind, id: rest.slice(0, i2), title: decodeURIComponent(rest.slice(i2 + 1)) };
+}
+
+function tmdbRefParts(ref) {
+  const parts = ref.split(':');
+  return { srcId: parts[0], path: parts.slice(1).join(':') };
+}
+
+registerSource({
+  id: 'tmdb',
+  label: 'Catálogo TMDB',
+  kind: 'movie',
+  async search() { return []; },
+  async episodes(path) {
+    const { kind, title } = tmdbSplit(path);
+    if (!title) return { episodes: [] };
+    const cands = await tmdbCandidates(title, 'series');
+    for (const c of cands) {
+      const src = SOURCES[c.srcId];
+      if (!src || !src.episodes) continue;
+      const { path: p } = tmdbRefParts(c.ref);
+      let eps;
+      try { eps = await src.episodes(p); } catch { continue; }
+      if (eps && eps.episodes && eps.episodes.length) {
+        log(`[tmdb] episodes for "${title}" from ${c.srcId}: ${eps.episodes.length}`);
+        return eps;
+      }
+    }
+    return { episodes: [] };
+  },
+  async resolve(path) {
+    const { kind, title } = tmdbSplit(path);
+    if (!title) return null;
+    const cands = await tmdbCandidates(title, kind === 'series' ? 'series' : 'movie');
+    for (const c of cands) {
+      const src = SOURCES[c.srcId];
+      if (!src || !src.resolve) continue;
+      const { path: p } = tmdbRefParts(c.ref);
+      let st;
+      try { st = await src.resolve(p); } catch { continue; }
+      if (st && st.url) {
+        log(`[tmdb] resolved "${title}" via ${c.srcId}`);
+        return st;
+      }
+    }
+    log(`[tmdb] no source resolved "${title}"`);
+    return null;
+  }
+});
+
 /* ---------- fan-out orchestration ---------- */
 
 const SEARCH_TIMEOUT_MS = 12000;
@@ -1972,7 +2276,7 @@ export async function search(params) {
   log(`[search] called with query: "${query}"`);
   if (!query) return [];
 
-  const ids = Object.keys(SOURCES);
+  const ids = Object.keys(SOURCES).filter((id) => id !== 'tmdb');
   log(`[search] dispatching query across ${ids.length} sources`);
   const settled = await Promise.allSettled(ids.map((id) => safeSearch(SOURCES[id], query)));
   const groups = settled.map((s, idx) => {
@@ -1981,40 +2285,40 @@ export async function search(params) {
     return hits;
   });
   const results = mergeAndRank(groups, query).slice(0, 100);
+  await tmdbEnrich(results, query);
   log(`[search] total ranked results: ${results.length}`);
   return results;
 }
 
 export async function home() {
   await kino.sleep(0);
-  log('[home] loading curated rows');
+  log('[home] loading rows');
 
-  const sourcesList = [
-    { key: 'sl', id: 'sl-estrenos', title: '🎬 SoloLatino · Estrenos', genre: 'peliculas' },
-    { key: 'cc', id: 'cc-peliculas', title: '🍿 CineCalidad · Películas', genre: 'peliculas' },
-    { key: 'hs', id: 'hs-estrenos', title: '⚡ HackStore · Cartelera', genre: 'peliculas' },
-    { key: 'vpo', id: 'vpo-estrenos', title: '🌟 VerPelículasOnline · Novedades', genre: 'peliculas' },
-    { key: 'pgh', id: 'pgh-cine', title: '🎥 PelisGratisHDs · Cine', genre: 'peliculas' },
-    { key: 'ppd', id: 'ppd-populares', title: '✨ PelisPlusHD · Tendencias', genre: 'peliculas' },
-    { key: 'ent', id: 'ent-estrenos', title: '💎 EntrePelículas · Destacados', genre: 'peliculas' },
-    { key: 'cv', id: 'cv-series', title: '📺 CuevanaSerie · Series', genre: 'series' },
-    { key: 'n79', id: 'n79-top', title: '🏆 Net79 · Top TMDb', genre: 'peliculas' },
-    { key: '1mv', id: '1mv-cinema', title: '🌍 1Movies · Cinema', genre: 'peliculas' },
-    { key: 'av1', id: 'av1-anime', title: '🔥 AnimeAV1 · Últimos', genre: 'anime' },
-    { key: 'afv', id: 'afv-anime', title: '⭐ AnimeFLV · Populares', genre: 'anime' },
-    { key: 'jkanime', id: 'jk-episodios', title: '🎯 JKAnime · Últimos episodios', genre: 'anime' }
-  ];
+  const rows = await tmdbHomeRows();
 
-  const settled = await Promise.allSettled(sourcesList.map((s) => safeHome(SOURCES[s.key])));
-
-  const rows = [];
-  sourcesList.forEach((s, idx) => {
-    const items = settled[idx].status === 'fulfilled' ? settled[idx].value : [];
-    log(`[home] ${s.key}: ${items.length} items`);
-    if (items.length) {
-      rows.push({ id: s.id, title: s.title, items: items.slice(0, 30), genre: s.genre });
-    }
-  });
+  if (tmdbWantSourceRows()) {
+    const sourcesList = [
+      { key: 'sl', id: 'sl-estrenos', title: '🎬 SoloLatino · Estrenos', genre: 'peliculas' },
+      { key: 'cc', id: 'cc-peliculas', title: '🍿 CineCalidad · Películas', genre: 'peliculas' },
+      { key: 'hs', id: 'hs-estrenos', title: '⚡ HackStore · Cartelera', genre: 'peliculas' },
+      { key: 'vpo', id: 'vpo-estrenos', title: '🌟 VerPelículasOnline · Novedades', genre: 'peliculas' },
+      { key: 'pgh', id: 'pgh-cine', title: '🎥 PelisGratisHDs · Cine', genre: 'peliculas' },
+      { key: 'ppd', id: 'ppd-populares', title: '✨ PelisPlusHD · Tendencias', genre: 'peliculas' },
+      { key: 'ent', id: 'ent-estrenos', title: '💎 EntrePelículas · Destacados', genre: 'peliculas' },
+      { key: 'cv', id: 'cv-series', title: '📺 CuevanaSerie · Series', genre: 'series' },
+      { key: 'n79', id: 'n79-top', title: '🏆 Net79 · Top TMDb', genre: 'peliculas' },
+      { key: '1mv', id: '1mv-cinema', title: '🌍 1Movies · Cinema', genre: 'peliculas' },
+      { key: 'av1', id: 'av1-anime', title: '🔥 AnimeAV1 · Últimos', genre: 'anime' },
+      { key: 'afv', id: 'afv-anime', title: '⭐ AnimeFLV · Populares', genre: 'anime' },
+      { key: 'jkanime', id: 'jk-episodios', title: '🎯 JKAnime · Últimos episodios', genre: 'anime' }
+    ];
+    const settled = await Promise.allSettled(sourcesList.map((s) => safeHome(SOURCES[s.key])));
+    sourcesList.forEach((s, idx) => {
+      const items = settled[idx].status === 'fulfilled' ? settled[idx].value : [];
+      log(`[home] ${s.key}: ${items.length} items`);
+      if (items.length) rows.push({ id: s.id, title: s.title, items: items.slice(0, 30), genre: s.genre });
+    });
+  }
 
   log(`[home] total rows: ${rows.length}`);
   return rows;
@@ -2131,6 +2435,17 @@ export async function categories() {
     { id: 'cat-accion', title: 'Acción y Aventura', ref: 'browse:action', art: 'https://image.tmdb.org/t/p/w780/mKFLAevD84x6n6T91d1uD36gT6.jpg' },
     { id: 'cat-terror', title: 'Terror y Suspenso', ref: 'browse:horror', art: 'https://image.tmdb.org/t/p/w780/9faGSFi5jam6pDWGNdcu8R8Gv5v.jpg' }
   ];
+}
+
+export async function settingsStatus() {
+  const hasKey = !!tmdbKey();
+  const lang = tmdbLang();
+  const src = tmdbWantSourceRows();
+  const lines = [];
+  lines.push(hasKey ? 'Catálogo TMDB activo (' + lang + ')' : 'Sin API key de TMDB: el catálogo usa solo las fuentes');
+  lines.push(src ? 'Filas de fuentes: activadas' : 'Filas de fuentes: ocultas');
+  lines.push(hasKey ? 'Búsqueda enriquecida con TMDb' : 'Pega tu API key para mejorar el catálogo');
+  return { estado: lines.join(' · ') };
 }
 
 export async function browse(params) {
