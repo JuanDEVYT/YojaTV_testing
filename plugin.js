@@ -79,7 +79,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '5.0.1';
+const PLUGIN_VERSION = '5.0.2';
 
 function log(...args) {
   try {
@@ -2019,7 +2019,6 @@ registerSource({
 const TMDB_API = 'https://api.themoviedb.org/3';
 const TMDB_IMG = 'https://image.tmdb.org/t/p';
 const TMDB_CACHE_MS = 6 * 60 * 60 * 1000;
-const TMDB_TIMEOUT_MS = 8000;
 
 const TMDB_MOVIE_SRCS = ['cc', 'pgh', 'cv', 'sl', 'hs', 'chp', 'chx', 'ent', 'n79', 'ppd', 'ofx', '1mv', 'vpo'];
 const TMDB_SERIES_SRCS = ['sl', 'cv', 'pgh', 'cc', 'ent', 'n79', 'chp', 'chx', 'hs', 'jkanime', 'av1', 'afv'];
@@ -2064,11 +2063,7 @@ async function tmdbFetch(path, params) {
     }
   }
   const url = TMDB_API + path + '?' + qs.join('&');
-  const r = await Promise.race([
-    fetchJson(url, { Accept: 'application/json' }),
-    new Promise((res) => setTimeout(() => res(null), TMDB_TIMEOUT_MS))
-  ]);
-  return r || null;
+  return fetchJson(url, { Accept: 'application/json' });
 }
 
 function tmdbImage(p, size) {
@@ -2239,7 +2234,6 @@ registerSource({
 
 /* ---------- fan-out orchestration ---------- */
 
-const SEARCH_TIMEOUT_MS = 8000;
 const SEARCH_CONCURRENCY = 5;
 
 async function mapLimit(list, limit, fn) {
@@ -2260,13 +2254,11 @@ async function mapLimit(list, limit, fn) {
 }
 
 async function safeSearch(src, q) {
-  try { return await Promise.race([src.search(q), new Promise((r) => setTimeout(() => r([]), SEARCH_TIMEOUT_MS))]); }
-  catch { return []; }
+  try { return await src.search(q); } catch { return []; }
 }
 
 async function safeHome(src) {
-  try { return await Promise.race([src.home ? src.home() : [], new Promise((r) => setTimeout(() => r([]), 10000))]); }
-  catch { return []; }
+  try { return src.home ? await src.home() : []; } catch { return []; }
 }
 
 function mergeAndRank(results, query) {
