@@ -2108,7 +2108,7 @@ async function tmdbHomeRows() {
     { id: 'tmdb-top-series', title: '🏆 Mejor valoradas', path: '/tv/top_rated', kind: 'series', genre: 'series' },
     { id: 'tmdb-upcoming', title: '📅 Próximos estrenos', path: '/movie/upcoming', kind: 'movie', genre: 'peliculas' }
   ];
-  const settled = await Promise.allSettled(specs.map((s) => tmdbFetch(s.path, s.params)));
+  const settled = await mapLimit(specs, 4, (s) => tmdbFetch(s.path, s.params));
   specs.forEach((s, i) => {
     const j = settled[i].status === 'fulfilled' ? settled[i].value : null;
     const items = tmdbRowsOf(j, s.kind);
@@ -2156,7 +2156,7 @@ async function tmdbEnrich(items, query) {
 async function tmdbCandidates(title, kind) {
   const want = kind === 'series' ? 'series' : 'movie';
   const ids = kind === 'series' ? TMDB_SERIES_SRCS : TMDB_MOVIE_SRCS;
-  const settled = await Promise.allSettled(ids.map((id) => safeSearch(SOURCES[id], title)));
+  const settled = await mapLimit(ids, SEARCH_CONCURRENCY, (id) => safeSearch(SOURCES[id], title));
   const out = [];
   const seen = new Set();
   const target = tmdbNormTitle(title);
@@ -2239,7 +2239,25 @@ registerSource({
 
 /* ---------- fan-out orchestration ---------- */
 
-const SEARCH_TIMEOUT_MS = 12000;
+const SEARCH_TIMEOUT_MS = 8000;
+const SEARCH_CONCURRENCY = 5;
+
+async function mapLimit(list, limit, fn) {
+  const out = new Array(list.length);
+  let cursor = 0;
+  const workers = [];
+  const n = Math.max(1, Math.min(limit, list.length));
+  for (let w = 0; w < n; w++) {
+    workers.push((async () => {
+      while (cursor < list.length) {
+        const idx = cursor++;
+        out[idx] = await fn(list[idx], idx);
+      }
+    })());
+  }
+  await Promise.all(workers);
+  return out;
+}
 
 async function safeSearch(src, q) {
   try { return await Promise.race([src.search(q), new Promise((r) => setTimeout(() => r([]), SEARCH_TIMEOUT_MS))]); }
@@ -2247,7 +2265,8 @@ async function safeSearch(src, q) {
 }
 
 async function safeHome(src) {
-  try { return src.home ? await src.home() : []; } catch { return []; }
+  try { return await Promise.race([src.home ? src.home() : [], new Promise((r) => setTimeout(() => r([]), 10000))]); }
+  catch { return []; }
 }
 
 function mergeAndRank(results, query) {
@@ -2278,10 +2297,9 @@ export async function search(params) {
 
   const ids = Object.keys(SOURCES).filter((id) => id !== 'tmdb');
   log(`[search] dispatching query across ${ids.length} sources`);
-  const settled = await Promise.allSettled(ids.map((id) => safeSearch(SOURCES[id], query)));
-  const groups = settled.map((s, idx) => {
-    const hits = s.status === 'fulfilled' ? s.value : [];
-    log(`[search] source ${ids[idx]}: ${hits.length} items`);
+  const groups = await mapLimit(ids, SEARCH_CONCURRENCY, async (id, idx) => {
+    const hits = await safeSearch(SOURCES[id], query);
+    log(`[search] source ${id}: ${hits.length} items`);
     return hits;
   });
   const results = mergeAndRank(groups, query).slice(0, 100);
@@ -2312,9 +2330,9 @@ export async function home() {
       { key: 'afv', id: 'afv-anime', title: '⭐ AnimeFLV · Populares', genre: 'anime' },
       { key: 'jkanime', id: 'jk-episodios', title: '🎯 JKAnime · Últimos episodios', genre: 'anime' }
     ];
-    const settled = await Promise.allSettled(sourcesList.map((s) => safeHome(SOURCES[s.key])));
+    const settled = await mapLimit(sourcesList, SEARCH_CONCURRENCY, (s) => safeHome(SOURCES[s.key]));
     sourcesList.forEach((s, idx) => {
-      const items = settled[idx].status === 'fulfilled' ? settled[idx].value : [];
+      const items = settled[idx] || [];
       log(`[home] ${s.key}: ${items.length} items`);
       if (items.length) rows.push({ id: s.id, title: s.title, items: items.slice(0, 30), genre: s.genre });
     });
@@ -2346,79 +2364,46 @@ export async function section(param) {
   const rows = [];
 
   if (selectedTab === 'peliculas') {
-    const [rSl, rCc, rHs, rVpo, rPgh, rPpd, rEnt, rN79, r1mv] = await Promise.allSettled([
-      safeHome(SOURCES.sl),
-      safeHome(SOURCES.cc),
-      safeHome(SOURCES.hs),
-      safeHome(SOURCES.vpo),
-      safeHome(SOURCES.pgh),
-      safeHome(SOURCES.ppd),
-      safeHome(SOURCES.ent),
-      safeHome(SOURCES.n79),
-      safeHome(SOURCES['1mv'])
-    ]);
-    const sl = (rSl.status === 'fulfilled' ? rSl.value : []).filter((x) => x.kind === 'movie');
-    if (sl.length) rows.push({ id: 'sec-sl-movies', title: '🎬 SoloLatino · Películas', items: sl.slice(0, 30), genre: 'peliculas' });
-
-    const cc = (rCc.status === 'fulfilled' ? rCc.value : []).filter((x) => x.kind === 'movie');
-    if (cc.length) rows.push({ id: 'sec-cc-movies', title: '🍿 CineCalidad · Novedades', items: cc.slice(0, 30), genre: 'peliculas' });
-
-    const hs = (rHs.status === 'fulfilled' ? rHs.value : []).filter((x) => x.kind === 'movie');
-    if (hs.length) rows.push({ id: 'sec-hs-movies', title: '⚡ HackStore · Cartelera', items: hs.slice(0, 30), genre: 'peliculas' });
-
-    const vpo = (rVpo.status === 'fulfilled' ? rVpo.value : []).filter((x) => x.kind === 'movie');
-    if (vpo.length) rows.push({ id: 'sec-vpo-movies', title: '🌟 VerPelículasOnline · Estrenos', items: vpo.slice(0, 30), genre: 'peliculas' });
-
-    const pgh = (rPgh.status === 'fulfilled' ? rPgh.value : []).filter((x) => x.kind === 'movie');
-    if (pgh.length) rows.push({ id: 'sec-pgh-movies', title: '🎥 PelisGratisHDs · HD', items: pgh.slice(0, 30), genre: 'peliculas' });
-
-    const ppd = (rPpd.status === 'fulfilled' ? rPpd.value : []).filter((x) => x.kind === 'movie');
-    if (ppd.length) rows.push({ id: 'sec-ppd-movies', title: '✨ PelisPlusHD · Cine', items: ppd.slice(0, 30), genre: 'peliculas' });
-
-    const ent = (rEnt.status === 'fulfilled' ? rEnt.value : []).filter((x) => x.kind === 'movie');
-    if (ent.length) rows.push({ id: 'sec-ent-movies', title: '💎 EntrePelículas · Selección', items: ent.slice(0, 30), genre: 'peliculas' });
-
-    const n79 = (rN79.status === 'fulfilled' ? rN79.value : []).filter((x) => x.kind === 'movie');
-    if (n79.length) rows.push({ id: 'sec-n79-movies', title: '🏆 Net79 · Películas Populares', items: n79.slice(0, 30), genre: 'peliculas' });
-
-    const m1v = (r1mv.status === 'fulfilled' ? r1mv.value : []).filter((x) => x.kind === 'movie');
-    if (m1v.length) rows.push({ id: 'sec-1mv-movies', title: '🌍 1Movies · Global', items: m1v.slice(0, 30), genre: 'peliculas' });
+    const list = [
+      { key: 'sl', id: 'sec-sl-movies', title: '🎬 SoloLatino · Películas' },
+      { key: 'cc', id: 'sec-cc-movies', title: '🍿 CineCalidad · Novedades' },
+      { key: 'hs', id: 'sec-hs-movies', title: '⚡ HackStore · Cartelera' },
+      { key: 'vpo', id: 'sec-vpo-movies', title: '🌟 VerPelículasOnline · Estrenos' },
+      { key: 'pgh', id: 'sec-pgh-movies', title: '🎥 PelisGratisHDs · HD' },
+      { key: 'ppd', id: 'sec-ppd-movies', title: '✨ PelisPlusHD · Cine' },
+      { key: 'ent', id: 'sec-ent-movies', title: '💎 EntrePelículas · Selección' },
+      { key: 'n79', id: 'sec-n79-movies', title: '🏆 Net79 · Películas Populares' },
+      { key: '1mv', id: 'sec-1mv-movies', title: '🌍 1Movies · Global' }
+    ];
+    const got = await mapLimit(list, SEARCH_CONCURRENCY, (s) => safeHome(SOURCES[s.key]));
+    list.forEach((s, i) => {
+      const mv = (got[i] || []).filter((x) => x.kind === 'movie');
+      if (mv.length) rows.push({ id: s.id, title: s.title, items: mv.slice(0, 30), genre: 'peliculas' });
+    });
   } else if (selectedTab === 'series') {
-    const [rCv, rSl, rPgh, rEnt, rN79] = await Promise.allSettled([
-      safeHome(SOURCES.cv),
-      safeHome(SOURCES.sl),
-      safeHome(SOURCES.pgh),
-      safeHome(SOURCES.ent),
-      safeHome(SOURCES.n79)
-    ]);
-    const cv = (rCv.status === 'fulfilled' ? rCv.value : []).filter((x) => x.kind === 'series');
-    if (cv.length) rows.push({ id: 'sec-cv-series', title: '📺 CuevanaSerie · Populares', items: cv.slice(0, 30), genre: 'series' });
-
-    const sl = (rSl.status === 'fulfilled' ? rSl.value : []).filter((x) => x.kind === 'series');
-    if (sl.length) rows.push({ id: 'sec-sl-series', title: '🔥 SoloLatino · Temporadas', items: sl.slice(0, 30), genre: 'series' });
-
-    const pgh = (rPgh.status === 'fulfilled' ? rPgh.value : []).filter((x) => x.kind === 'series');
-    if (pgh.length) rows.push({ id: 'sec-pgh-series', title: '✨ PelisGratisHDs · Series', items: pgh.slice(0, 30), genre: 'series' });
-
-    const ent = (rEnt.status === 'fulfilled' ? rEnt.value : []).filter((x) => x.kind === 'series');
-    if (ent.length) rows.push({ id: 'sec-ent-series', title: '💎 EntrePelículas · Capítulos', items: ent.slice(0, 30), genre: 'series' });
-
-    const n79 = (rN79.status === 'fulfilled' ? rN79.value : []).filter((x) => x.kind === 'series');
-    if (n79.length) rows.push({ id: 'sec-n79-series', title: '🏆 Net79 · Series Populares', items: n79.slice(0, 30), genre: 'series' });
+    const list = [
+      { key: 'cv', id: 'sec-cv-series', title: '📺 CuevanaSerie · Populares' },
+      { key: 'sl', id: 'sec-sl-series', title: '🔥 SoloLatino · Temporadas' },
+      { key: 'pgh', id: 'sec-pgh-series', title: '✨ PelisGratisHDs · Series' },
+      { key: 'ent', id: 'sec-ent-series', title: '💎 EntrePelículas · Capítulos' },
+      { key: 'n79', id: 'sec-n79-series', title: '🏆 Net79 · Series Populares' }
+    ];
+    const got = await mapLimit(list, SEARCH_CONCURRENCY, (s) => safeHome(SOURCES[s.key]));
+    list.forEach((s, i) => {
+      const sv = (got[i] || []).filter((x) => x.kind === 'series');
+      if (sv.length) rows.push({ id: s.id, title: s.title, items: sv.slice(0, 30), genre: 'series' });
+    });
   } else if (selectedTab === 'anime') {
-    const [rAv1, rAfv, rJk] = await Promise.allSettled([
-      safeHome(SOURCES.av1),
-      safeHome(SOURCES.afv),
-      safeHome(SOURCES.jkanime)
-    ]);
-    const av1 = rAv1.status === 'fulfilled' ? rAv1.value : [];
-    if (av1.length) rows.push({ id: 'sec-av1-anime', title: '🔥 AnimeAV1 · Últimos episodios', items: av1.slice(0, 30), genre: 'anime' });
-
-    const afv = rAfv.status === 'fulfilled' ? rAfv.value : [];
-    if (afv.length) rows.push({ id: 'sec-afv-anime', title: '⭐ AnimeFLV · En emisión', items: afv.slice(0, 30), genre: 'anime' });
-
-    const jk = rJk.status === 'fulfilled' ? rJk.value : [];
-    if (jk.length) rows.push({ id: 'sec-jk-anime', title: '🎯 JKAnime · Lo más visto', items: jk.slice(0, 30), genre: 'anime' });
+    const list = [
+      { key: 'av1', id: 'sec-av1-anime', title: '🔥 AnimeAV1 · Últimos episodios' },
+      { key: 'afv', id: 'sec-afv-anime', title: '⭐ AnimeFLV · En emisión' },
+      { key: 'jkanime', id: 'sec-jk-anime', title: '🎯 JKAnime · Lo más visto' }
+    ];
+    const got = await mapLimit(list, SEARCH_CONCURRENCY, (s) => safeHome(SOURCES[s.key]));
+    list.forEach((s, i) => {
+      const an = got[i] || [];
+      if (an.length) rows.push({ id: s.id, title: s.title, items: an.slice(0, 30), genre: 'anime' });
+    });
   }
 
   log(`[section] returned ${rows.length} rows for tab ${selectedTab}`);
