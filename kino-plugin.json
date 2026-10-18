@@ -1,7 +1,7 @@
 {
   "id": "yoja-tv-kino",
   "name": "YojaTV",
-  "version": "5.0.2",
+  "version": "5.1.0",
   "apiVersion": 6,
   "entry": "plugin.js",
   "description": "Plugin de YojaTV para Kino TV. Películas de cine en español latino, series y anime. Creado por JuandreXter, YojanderGaming y einer_bg.",
@@ -136,6 +136,9 @@
     "goodstream.one",
     "www.goodstream.one",
     "*.goodstream.one",
+    "goodstream.uno",
+    "www.goodstream.uno",
+    "*.goodstream.uno",
     "vimeos.net",
     "www.vimeos.net",
     "*.vimeos.net",
@@ -158,6 +161,8 @@
     "www.fotise.com",
     "vidhidepro.com",
     "www.vidhidepro.com",
+    "vidhidefast.com",
+    "www.vidhidefast.com",
     "unlimplay.com",
     "www.unlimplay.com",
     "vimeos.unlimplay.com",
@@ -185,6 +190,9 @@
     "videasy.net",
     "player.videasy.net",
     "*.videasy.net",
+    "player.videasy.to",
+    "waaw.to",
+    "*.waaw.to",
     "vidapi.xyz",
     "*.vidapi.xyz",
     "nontongo.stream",
@@ -213,6 +221,6 @@
   "icon": "icon.png",
   "signature": {
     "authorKey": "c3caf0f9e51197553082904a2655d51e5afcca579a3048cdfbd8a97f7b2cf2c3",
-    "value": "34566f05e63376ea05d598c2371d8f25b7000aba4b7054af4a97bdd567edc13622d2f5fba149033bebb9228df8109c422e0dbb45613f36fa38624b5b92fbf90a"
+    "value": "86d3c33fb7d8e6a0b7cf4fad290ddf2db96de918dbc2ce8bf287575563a75bda12c15ea1f57a1564dfde54eb8b3652cd5dd41798dfbd80044f988abb10215803"
   }
 }

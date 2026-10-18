@@ -79,7 +79,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '5.0.2';
+const PLUGIN_VERSION = '5.1.0';
 
 function log(...args) {
   try {
@@ -265,6 +265,65 @@ function decodeVoePayload(ct, luts) {
   }
 }
 
+function binToHex(bin) {
+  let hex = '';
+  for (let i = 0; i < bin.length; i++) hex += bin.charCodeAt(i).toString(16).padStart(2, '0');
+  return hex;
+}
+
+// embed69-style pages: SHA-256 proof-of-work then AES-256-CBC over base64(IV||ct).
+function solvePowKey(challenge, difficulty, salt) {
+  const prefix = '0'.repeat(Math.max(1, difficulty | 0));
+  for (let nonce = 0; nonce < 2000000; nonce++) {
+    const hash = kino.crypto.hash('sha256', challenge + nonce);
+    if (hash.startsWith(prefix)) return kino.crypto.hash('sha256', challenge + nonce + salt);
+  }
+  return null;
+}
+
+function decryptB64AesCbc(encB64, keyHex) {
+  try {
+    const raw = atob(encB64);
+    if (raw.length <= 16) return null;
+    return kino.crypto.decrypt('aes-256-cbc', {
+      key: keyHex, keyEncoding: 'hex',
+      iv: binToHex(raw.slice(0, 16)), ivEncoding: 'hex',
+      data: btoa(raw.slice(16))
+    });
+  } catch { return null; }
+}
+
+async function resolveEmbed69(pageText, referer) {
+  const powC = /const POW_CHALLENGE = '([^']+)'/.exec(pageText);
+  const powD = /const POW_DIFFICULTY = (\d+)/.exec(pageText);
+  const powS = /const POW_SALT = '([^']+)'/.exec(pageText);
+  const dlM = /let dataLink = (\[[\s\S]*?\]);/.exec(pageText);
+  if (!powC || !powS || !dlM) return null;
+  const keyHex = solvePowKey(powC[1], powD ? +powD[1] : 3, powS[1]);
+  if (!keyHex) return null;
+  let dataLink;
+  try { dataLink = JSON.parse(dlM[1]); } catch { return null; }
+  if (!Array.isArray(dataLink) || !dataLink.length) return null;
+  // Prefer the LATINO file, then any other.
+  const files = dataLink.slice().sort((a, b) => (b.video_language === 'LAT') - (a.video_language === 'LAT'));
+  const candidates = [];
+  for (const f of files) {
+    if (!f || !Array.isArray(f.sortedEmbeds)) continue;
+    for (const e of f.sortedEmbeds) {
+      if (!e || !e.link) continue;
+      const url = decryptB64AesCbc(e.link, keyHex);
+      if (url && url.startsWith('http') && !candidates.some((c) => c.url === url)) {
+        candidates.push({ name: e.servername || 'Servidor', url });
+      }
+    }
+  }
+  for (const c of candidates.slice(0, 6)) {
+    const st = await resolveEmbedUrl(c.url, referer);
+    if (st && st.url) return st;
+  }
+  return null;
+}
+
 async function resolveEmbedUrl(embedUrl, referer) {
   if (!embedUrl || typeof embedUrl !== 'string') return null;
   let u = embedUrl.trim();
@@ -282,6 +341,15 @@ async function resolveEmbedUrl(embedUrl, referer) {
     return { url: u, headers: { 'User-Agent': UA, ...(referer ? { Referer: referer } : {}) } };
   }
 
+  if (u.includes('embed69.org') || u.includes('pelisserieshoy.com')) {
+    const pg = await fetchText(u, { Referer: referer });
+    if (pg.ok) {
+      const st = await resolveEmbed69(pg.text, u);
+      if (st && st.url) return st;
+    }
+    return null;
+  }
+
   if (u.includes('vimeos.net') || u.includes('vimeos.zip')) {
     const v = await fetchText(u, { Referer: referer || 'https://vimeos.net/' });
     if (v.ok) {
@@ -296,7 +364,7 @@ async function resolveEmbedUrl(embedUrl, referer) {
     return null;
   }
 
-  if (u.includes('goodstream.one')) {
+  if (u.includes('goodstream.one') || u.includes('goodstream.uno')) {
     const g = await fetchText(u, { Referer: referer || 'https://goodstream.one/' });
     if (g.ok) {
       const unpacked = extractPackedJs(g.text);
@@ -1764,6 +1832,13 @@ registerSource({
     const j = await fetchJson(embedUrl);
     if (!j) return null;
     if (j.url) return { url: j.url };
+    if (j.mp4) {
+      const alts = (Array.isArray(j.streams) ? j.streams : []).filter((s) => s && s.url && s.url !== j.mp4);
+      return {
+        url: j.mp4,
+        ...(alts.length ? { alternatives: alts.slice(0, 6).map((s) => ({ label: (s.resolution || '') + 'p', url: s.url })) } : {})
+      };
+    }
     // Response may be array of quality sources [{quality, url}]
     if (Array.isArray(j)) {
       const sorted = j.filter((x) => x && x.url).sort((a, b) => {
@@ -2140,8 +2215,8 @@ async function tmdbEnrich(items, query) {
   }
   for (const it of items) {
     if (it.ids && it.ids.tmdb) continue;
-    const h = byTitle[tmdbNormTitle(it.title)];
-    if (!h || h.kind !== it.kind) continue;
+    const h = byTitle[tmdbNormTitle(stripYearSuffix(it.title))] || byTitle[tmdbNormTitle(it.title)];
+    if (!h || h.kind !== (it.kind || 'movie')) continue;
     it.ids = { ...(it.ids || {}), tmdb: h.id };
     if (!it.year && h.year) it.year = h.year;
   }
@@ -2261,17 +2336,82 @@ async function safeHome(src) {
   try { return src.home ? await src.home() : []; } catch { return []; }
 }
 
+function stripYearSuffix(s) {
+  return String(s || '').replace(/\s*[('(]?\b(?:19|20)\d{2}\b[)]?\s*$/, '').trim();
+}
+
+function addToGroup(g, item) {
+  if (g.seen.has(item.ref)) return;
+  g.seen.add(item.ref);
+  g.refs.push(item.ref);
+  const p = g.primary;
+  if (!p.poster && item.poster) p.poster = item.poster;
+  if (!p.year && item.year) p.year = item.year;
+  if ((p.rating || 0) < (item.rating || 0)) p.rating = item.rating;
+  if (!p.overview && item.overview) p.overview = item.overview;
+  if (!p.ids && item.ids) p.ids = item.ids;
+}
+
+function newGroup(item) {
+  return { primary: item, refs: [], seen: new Set(), norm: tmdbNormTitle(stripYearSuffix(item.title)) };
+}
+
 function mergeAndRank(results, query) {
-  const seen = new Set();
-  const out = [];
-  for (const group of results) {
-    for (const item of group) {
-      if (!item || !item.id || !item.ref || !item.title) continue;
-      const key = item.id + '|' + item.ref;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(item);
+  const all = [];
+  for (const group of results) for (const item of group) if (item && item.id && item.ref && item.title) all.push(item);
+
+  // Phase 1: group by TMDB id when present (most reliable identity).
+  const byTmdb = new Map();
+  const loose = [];
+  for (const item of all) {
+    const tid = item.ids && item.ids.tmdb;
+    if (tid) {
+      const key = (item.kind || 'movie') + '|t' + tid;
+      let g = byTmdb.get(key);
+      if (!g) { g = newGroup(item); byTmdb.set(key, g); }
+      addToGroup(g, item);
+    } else loose.push(item);
+  }
+
+  // Bucket loose items by title (year stripped). Attach to a matching TMDB group
+  // when possible; otherwise keep together unless items show CONFLICTING years.
+  const byNorm = new Map();
+  for (const item of loose) {
+    const kind = item.kind || 'movie';
+    const base = kind + '|' + tmdbNormTitle(stripYearSuffix(item.title));
+    let arr = byNorm.get(base);
+    if (!arr) { arr = []; byNorm.set(base, arr); }
+    arr.push(item);
+  }
+  const fallbackGroups = [];
+  for (const [base, arr] of byNorm) {
+    const kind = base.slice(0, base.indexOf('|'));
+    const norm = base.slice(base.indexOf('|') + 1);
+    const tg = [...byTmdb.values()].find((g) => g.norm === norm && (g.primary.kind || 'movie') === kind);
+    if (tg) { for (const it of arr) addToGroup(tg, it); continue; }
+    const years = [...new Set(arr.map((it) => it.year).filter(Boolean))];
+    if (years.length <= 1) {
+      const g = newGroup(arr[0]);
+      for (const it of arr) addToGroup(g, it);
+      fallbackGroups.push(g);
+    } else {
+      const byYear = new Map();
+      for (const it of arr) {
+        const y = it.year || years[0];
+        let g = byYear.get(y);
+        if (!g) { g = newGroup(it); byYear.set(y, g); }
+        addToGroup(g, it);
+      }
+      for (const g of byYear.values()) fallbackGroups.push(g);
     }
+  }
+
+  const out = [];
+  for (const g of [...byTmdb.values(), ...fallbackGroups]) {
+    if (g.refs.length > 1 && (g.primary.kind || 'movie') !== 'series') {
+      g.primary.ref = 'mg:' + encodeURIComponent(JSON.stringify(g.refs));
+    }
+    out.push(g.primary);
   }
   try { return kino.rank.filterRelevant(out, query); } catch { return out; }
 }
@@ -2294,8 +2434,10 @@ export async function search(params) {
     log(`[search] source ${id}: ${hits.length} items`);
     return hits;
   });
-  const results = mergeAndRank(groups, query).slice(0, 100);
-  await tmdbEnrich(results, query);
+  const all = [];
+  for (const g of groups) for (const it of g) if (it) all.push(it);
+  await tmdbEnrich(all, query);
+  const results = mergeAndRank([all], query).slice(0, 100);
   log(`[search] total ranked results: ${results.length}`);
   return results;
 }
@@ -2518,6 +2660,23 @@ export async function episodes(params) {
   return { episodes: eps.episodes || [] };
 }
 
+async function resolveOneRef(ref) {
+  let srcId, path;
+  if (ref.includes(':')) {
+    const parts = ref.split(':');
+    srcId = parts[0];
+    path = parts.slice(1).join(':');
+  } else {
+    srcId = SOURCES[ref] ? ref : 'cv';
+    path = ref;
+  }
+  const src = SOURCES[srcId];
+  if (!src || !src.resolve) return null;
+  let stream;
+  try { stream = await src.resolve(path); } catch { return null; }
+  return stream && stream.url ? stream : null;
+}
+
 export async function resolve(params) {
   await kino.sleep(0);
   let ref = '';
@@ -2529,30 +2688,41 @@ export async function resolve(params) {
     throw kino.error('not_found', 'Referencia no especificada');
   }
 
-  let srcId, path;
-  if (ref.includes(':')) {
-    const parts = ref.split(':');
-    srcId = parts[0];
-    path = parts.slice(1).join(':');
-  } else {
-    srcId = SOURCES[ref] ? ref : 'cv';
-    path = ref;
+  if (ref.startsWith('mg:')) {
+    let refs = [];
+    try { refs = JSON.parse(decodeURIComponent(ref.slice(3))); } catch {}
+    if (!Array.isArray(refs) || !refs.length) {
+      log('[resolve ERROR] malformed merged ref');
+      throw kino.error('not_found', 'Referencia fusionada inválida');
+    }
+    log(`[resolve] merged ref across ${refs.length} sources`);
+    const settled = await mapLimit(refs.slice(0, 8), 3, (r) => resolveOneRef(r));
+    const streams = [];
+    for (let i = 0; i < settled.length; i++) {
+      const s = settled[i];
+      if (s && s.url) {
+        const sid = refs[i].split(':')[0];
+        streams.push({ ...s, label: (SOURCES[sid] && SOURCES[sid].label) || sid });
+      }
+    }
+    if (!streams.length) {
+      log('[resolve ERROR] no source resolved the merged ref');
+      throw kino.error('unavailable', 'No se encontró un servidor de reproducción');
+    }
+    const primary = streams[0];
+    const alts = streams.slice(1, 6).map((s) => ({ label: s.label || 'Servidor', url: s.url, ...(s.headers ? { headers: s.headers } : {}) }));
+    log(`[resolve OK] merged resolved via ${streams.length} source(s): ${primary.url}`);
+    return { url: primary.url, ...(primary.headers ? { headers: primary.headers } : {}), ...(alts.length ? { alternatives: alts } : {}) };
   }
 
-  const src = SOURCES[srcId];
-  if (!src) {
-    log(`[resolve ERROR] unknown source: ${srcId}`);
+  const sid = ref.includes(':') ? ref.split(':')[0] : (SOURCES[ref] ? ref : 'cv');
+  if (!SOURCES[sid]) {
+    log(`[resolve ERROR] unknown source: ${sid}`);
     throw kino.error('not_found', 'Fuente desconocida');
   }
-  if (!src.resolve) {
-    log(`[resolve ERROR] source ${srcId} does not support playback`);
-    throw kino.error('unavailable', 'Esta fuente no soporta reproducción directa');
-  }
-
-  log(`[resolve] calling ${srcId}.resolve with path: "${path}"`);
-  const stream = await src.resolve(path);
-  if (!stream || !stream.url) {
-    log(`[resolve ERROR] no stream returned from ${srcId}`);
+  const stream = await resolveOneRef(ref);
+  if (!stream) {
+    log(`[resolve ERROR] no stream returned for ${ref}`);
     throw kino.error('unavailable', 'No se encontró un servidor de reproducción');
   }
   log(`[resolve OK] stream resolved: ${stream.url}`);
