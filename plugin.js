@@ -10,7 +10,7 @@ const HEADERS = { 'User-Agent': UA, 'Accept-Language': 'es-ES,es;q=0.9' };
 
 function cleanText(s) {
   if (!s) return '';
-  return s
+  const t = s
     .replace(/<[^>]+>/g, '')
     .replace(/&quot;/g, '"')
     .replace(/&#0?39;/g, "'")
@@ -20,9 +20,27 @@ function cleanText(s) {
     .replace(/&gt;/g, '>')
     .replace(/&nbsp;/g, ' ')
     .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
-    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)));
+  return undoubleUtf8(t).replace(/\s+/g, ' ').trim();
+}
+
+// Some sources serve UTF-8 bytes as Latin-1 ("MÃ©xico"): join lead+continuation pairs back.
+function undoubleUtf8(s) {
+  if (!/[\u00c2-\u00df][\u0080-\u00bf]/.test(s)) return s;
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    const n = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+    if (c >= 0xc2 && c <= 0xdf && n >= 0x80 && n <= 0xbf) {
+      out += String.fromCharCode(((c & 0x1f) << 6) | (n & 0x3f));
+      i++;
+    } else if (c > 0xff) {
+      return s;
+    } else {
+      out += s.charAt(i);
+    }
+  }
+  return out;
 }
 
 function getText(res) {
@@ -69,6 +87,46 @@ function extractPoster(htmlSnippet, baseDomain) {
   return fallback;
 }
 
+/** Best-effort "1080p" from a URL path/query, else null. */
+function qualityFromUrl(u) {
+  const m = /(?:^|[^\d])(2160|1080|720|576|480|360)p?(?=[^\d]|$)/i.exec(String(u || ''));
+  return m ? m[1] + 'p' : null;
+}
+
+/** Label the player shows in "Servidor": "1080p: Net79", or whichever part is known. */
+function srvLabel(q, server) {
+  if (q && server) return q + ': ' + server;
+  return q || server || null;
+}
+
+/** Rewrite a Stream's primary + alternatives labels as "quality: <name>" (apiVersion 6 shows the primary's label too). */
+function labelStream(stream, name) {
+  if (!stream || !stream.url) return stream;
+  const qFrom = (url, lbl) => {
+    if (typeof lbl === 'string') {
+      const m = /^(\d{3,4}p)\b/.exec(lbl.trim());
+      if (m) return m[1];
+    }
+    return qualityFromUrl(url);
+  };
+  const out = { ...stream };
+  out.label = srvLabel(qFrom(out.url, out.label), name) || name;
+  if (Array.isArray(out.alternatives)) {
+    out.alternatives = out.alternatives.map((a) => ({
+      ...a,
+      label: srvLabel(qFrom(a.url, a.label), name) || name
+    }));
+  }
+  return out;
+}
+
+/** Poster for a card whose image sits before the title anchor (bounded by the previous card's title). */
+function extractCardPoster(html, anchorIndex, base) {
+  const prev = html.lastIndexOf('title="', anchorIndex);
+  const start = Math.max(prev >= 0 ? prev + 7 : 0, anchorIndex - 2000);
+  return extractPoster(html.slice(start, anchorIndex + 600), base);
+}
+
 /** Sanitize a title/slug into a valid Kino item id (<=128 chars, ITEM_ID_RE charset). */
 function sanitizeId(raw, prefix) {
   const base = String(raw || '').toLowerCase().replace(/[^a-z0-9._~-]+/g, '-').replace(/^-+|-+$/g, '');
@@ -79,7 +137,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '5.1.1';
+const PLUGIN_VERSION = '5.2.0';
 
 function log(...args) {
   try {
@@ -96,7 +154,17 @@ function log(...args) {
 
 log(`Iniciando plugin YojaTV v${PLUGIN_VERSION} - Por JuandreXter, YojanderGaming y einer_bg`);
 
+// Kino allows at most 60 kino.fetch per plugin call; count ours so the catalog enrichment
+// stops before the engine rejects everything else in the same call.
+let FETCH_BUDGET = 60;
+function fetchBudgetReset() { FETCH_BUDGET = 60; }
+
 async function fetchText(url, headers) {
+  if (FETCH_BUDGET <= 0) {
+    log(`[HTTP GET BUDGET] cupo de 60 por llamada agotado <- ${url}`);
+    return { ok: false, status: 0, text: '', budget: true };
+  }
+  FETCH_BUDGET--;
   log(`[HTTP GET] -> ${url}`);
   try {
     const res = await kino.fetch(url, { headers: { ...HEADERS, ...(headers || {}) } });
@@ -865,8 +933,7 @@ registerSource({
       const id = sanitizeId(slug, 'hs');
       if (seen.has(id)) continue;
       seen.add(id);
-      const block = r.text.slice(Math.max(0, m.index - 500), m.index + 500);
-      const poster = extractPoster(block, 'https://www.hackstore.fo');
+      const poster = extractCardPoster(r.text, m.index, 'https://www.hackstore.fo');
       items.push({ id, ref: 'hs:' + cat + ':' + slug, title: cleanText(m[3]) || slugToTitle(slug), kind: type, poster: poster || null });
     }
     return items;
@@ -885,8 +952,7 @@ registerSource({
       const id = sanitizeId(slug, 'hs');
       if (seen.has(id)) continue;
       seen.add(id);
-      const block = r.text.slice(Math.max(0, m.index - 500), m.index + 500);
-      const poster = extractPoster(block, 'https://www.hackstore.fo');
+      const poster = extractCardPoster(r.text, m.index, 'https://www.hackstore.fo');
       const yearM = /\((\d{4})\)/.exec(m[3]);
       items.push({ id, ref: 'hs:' + cat + ':' + slug, title: cleanText(m[3]) || slugToTitle(slug), kind: type, poster: poster || null, year: yearM ? yearM[1] : null, badges: ['ESTRENO'] });
     }
@@ -1483,7 +1549,7 @@ registerSource({
       if (seen.has(id)) continue;
       seen.add(id);
       const poster = extractPoster(m[0], 'https://entrepeliculasyseries.nz') || m[3];
-      items.push({ id, ref: 'ent:' + path, title: cleanText(m[4]) || slugToTitle(slug), kind: type, poster: poster || null });
+      items.push({ id, ref: 'ent:' + path, title: tmdbQueryTitle(cleanText(m[4])) || slugToTitle(slug), kind: type, poster: poster || null });
     }
     return items;
   },
@@ -1502,7 +1568,7 @@ registerSource({
       if (seen.has(id)) continue;
       seen.add(id);
       const poster = extractPoster(m[0], 'https://entrepeliculasyseries.nz') || m[3];
-      items.push({ id, ref: 'ent:' + path, title: cleanText(m[4]) || slugToTitle(slug), kind: type, poster: poster || null, badges: ['LATINO'] });
+      items.push({ id, ref: 'ent:' + path, title: tmdbQueryTitle(cleanText(m[4])) || slugToTitle(slug), kind: type, poster: poster || null, badges: ['LATINO'] });
     }
     return items;
   },
@@ -1783,7 +1849,7 @@ registerSource({
     return j.items.slice(0, 40).map((x) => {
       const type = x.type === 'tv' ? 'series' : 'movie';
       const id = sanitizeId(String(x.tmdbId), 'n79');
-      return { id, ref: 'n79:' + type + ':' + x.tmdbId, title: cleanText(x.title) || slugToTitle(String(x.tmdbId)), kind: type, poster: x.poster || null, year: x.year ? String(x.year) : null, overview: cleanText(x.overview || ''), rating: x.rating ? Math.round(x.rating * 10) / 10 : null };
+      return { id, ref: 'n79:' + type + ':' + x.tmdbId, title: cleanText(x.title) || slugToTitle(String(x.tmdbId)), kind: type, poster: x.poster || null, year: x.year ? String(x.year) : null, overview: cleanText(x.overview || ''), rating: x.rating ? Math.round(x.rating * 10) / 10 : null, ...( +x.tmdbId > 0 ? { ids: { tmdb: +x.tmdbId } } : {}) };
     }).filter((x) => x.ref);
   },
   async home() {
@@ -1792,7 +1858,7 @@ registerSource({
     return j.items.slice(0, 30).map((x) => {
       const type = x.type === 'tv' ? 'series' : 'movie';
       const id = sanitizeId(String(x.tmdbId), 'n79');
-      return { id, ref: 'n79:' + type + ':' + x.tmdbId, title: cleanText(x.title) || slugToTitle(String(x.tmdbId)), kind: type, poster: x.poster || null, year: x.year ? String(x.year) : null, badges: ['FULL HD'] };
+      return { id, ref: 'n79:' + type + ':' + x.tmdbId, title: cleanText(x.title) || slugToTitle(String(x.tmdbId)), kind: type, poster: x.poster || null, year: x.year ? String(x.year) : null, badges: ['FULL HD'], ...( +x.tmdbId > 0 ? { ids: { tmdb: +x.tmdbId } } : {}) };
     }).filter((x) => x.ref);
   },
   async episodes(path) {
@@ -1833,10 +1899,16 @@ registerSource({
     if (!j) return null;
     if (j.url) return { url: j.url };
     if (j.mp4) {
-      const alts = (Array.isArray(j.streams) ? j.streams : []).filter((s) => s && s.url && s.url !== j.mp4);
+      const streams = (Array.isArray(j.streams) ? j.streams : []).filter((s) => s && s.url);
+      const rq = (x) => parseInt(String(x.resolution || x.quality || '0')) || 0;
+      const all = [{ url: j.mp4, resolution: j.resolution }].concat(streams.filter((s) => s.url !== j.mp4));
+      all.sort((a, b) => rq(b) - rq(a));
+      const primary = all[0];
+      const alts = all.slice(1, 6);
       return {
-        url: j.mp4,
-        ...(alts.length ? { alternatives: alts.slice(0, 6).map((s) => ({ label: (s.resolution || '') + 'p', url: s.url })) } : {})
+        url: primary.url,
+        ...(rq(primary) ? { label: rq(primary) + 'p' } : {}),
+        ...(alts.length ? { alternatives: alts.map((s) => ({ label: rq(s) ? rq(s) + 'p' : '', url: s.url })) } : {})
       };
     }
     // Response may be array of quality sources [{quality, url}]
@@ -1849,6 +1921,7 @@ registerSource({
       if (sorted.length > 0) {
         return {
           url: sorted[0].url,
+          ...(sorted[0].quality ? { label: sorted[0].quality + 'p' } : {}),
           ...(sorted.length > 1 ? { alternatives: sorted.slice(1, 8).map((s) => ({ label: (s.quality || '') + 'p', url: s.url })) } : {})
         };
       }
@@ -1947,7 +2020,7 @@ registerSource({
       const block = r.text.slice(Math.max(0, m.index - 200), m.index + 600);
       const titleM = /alt="([^"]+)"/.exec(block) || /data-title="([^"]+)"/.exec(block);
       const poster = extractPoster(block, 'https://pelisplushd.la');
-      items.push({ id, ref: 'ppd:' + path, title: cleanText(titleM ? titleM[1] : '') || slugToTitle(slug), kind: type, poster });
+      items.push({ id, ref: 'ppd:' + path, title: tmdbQueryTitle(cleanText(titleM ? titleM[1] : '')) || slugToTitle(slug), kind: type, poster });
     }
     return items;
   },
@@ -1970,7 +2043,7 @@ registerSource({
       const block = r.text.slice(Math.max(0, m.index - 200), m.index + 600);
       const titleM = /alt="([^"]+)"/.exec(block) || /data-title="([^"]+)"/.exec(block);
       const poster = extractPoster(block, 'https://pelisplushd.la');
-      items.push({ id, ref: 'ppd:' + path, title: cleanText(titleM ? titleM[1] : '') || slugToTitle(slug), kind: type, poster, badges: ['HD'] });
+      items.push({ id, ref: 'ppd:' + path, title: tmdbQueryTitle(cleanText(titleM ? titleM[1] : '')) || slugToTitle(slug), kind: type, poster, badges: ['HD'] });
     }
     return items;
   },
@@ -2102,6 +2175,11 @@ function tmdbKey() {
   try { const k = kino.config.get('tmdbKey'); return typeof k === 'string' ? k.trim() : ''; } catch { return ''; }
 }
 
+/** TMDB can answer when Kino has its own key (0.9.53+, kino.tmdb) or the person set one. */
+function tmdbReady() {
+  return typeof kino.tmdb === 'function' || !!tmdbKey();
+}
+
 function tmdbLang() {
   try { const l = kino.config.get('tmdbLang'); return typeof l === 'string' && l ? l : 'es-MX'; } catch { return 'es-MX'; }
 }
@@ -2125,20 +2203,41 @@ function tmdbStore(cacheKey, v) {
 }
 
 async function tmdbFetch(path, params) {
-  if (!tmdbKey()) return null;
   const cacheKey = 'tmdb:' + path + ':' + JSON.stringify(params || {});
   const hit = tmdbCached(cacheKey);
   if (hit) return hit;
-  const qs = ['api_key=' + encodeURIComponent(tmdbKey()), 'language=' + encodeURIComponent(tmdbLang())];
-  if (params) {
-    for (const k in params) {
+  let res = null;
+  // Kino 0.9.53+ puts the key itself (kino.tmdb): no setting needed from the person.
+  if (typeof kino.tmdb === 'function') {
+    const q = {};
+    if (params) for (const k in params) {
       const v = params[k];
-      if (v === undefined || v === null || v === '') continue;
-      qs.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v)));
+      if (v !== undefined && v !== null && v !== '') q[k] = v;
+    }
+    if (q.language === undefined) q.language = tmdbLang();
+    delete q.api_key; // nunca en params: Kino lo rechaza con invalid_request
+    try { res = await kino.tmdb(path, q); }
+    catch (e) {
+      const code = e && e.code;
+      if (code === 'rate_limited') return null; // ya agotamos la cuota: no repetir con la propia
+      res = null; // sin llave de Kino u otra falla: cae al respaldo de la llave propia
     }
   }
-  const url = TMDB_API + path + '?' + qs.join('&');
-  return fetchJson(url, { Accept: 'application/json' });
+  if (!res) {
+    if (!tmdbKey()) return null;
+    const qs = ['api_key=' + encodeURIComponent(tmdbKey()), 'language=' + encodeURIComponent(tmdbLang())];
+    if (params) {
+      for (const k in params) {
+        const v = params[k];
+        if (v === undefined || v === null || v === '') continue;
+        qs.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v)));
+      }
+    }
+    const url = TMDB_API + path + '?' + qs.join('&');
+    res = await fetchJson(url, { Accept: 'application/json' });
+  }
+  if (res) tmdbStore(cacheKey, res);
+  return res;
 }
 
 function tmdbImage(p, size) {
@@ -2168,7 +2267,7 @@ function tmdbRowsOf(j, kind) {
 }
 
 async function tmdbHomeRows() {
-  if (!tmdbKey()) return [];
+  if (!tmdbReady()) return [];
   const rows = [];
   const specs = [
     { id: 'tmdb-trend-movies', title: '🔥 Tendencias de la semana · Películas', path: '/trending/movie/week', kind: 'movie', genre: 'peliculas' },
@@ -2180,12 +2279,42 @@ async function tmdbHomeRows() {
   ];
   const settled = await mapLimit(specs, 4, (s) => tmdbFetch(s.path, s.params));
   specs.forEach((s, i) => {
-    const j = settled[i].status === 'fulfilled' ? settled[i].value : null;
+    const j = settled[i] || null;
     const items = tmdbRowsOf(j, s.kind);
     log(`[home] tmdb ${s.id}: ${items.length} items`);
     if (items.length) rows.push({ id: s.id, title: s.title, items: items.slice(0, 24), genre: s.genre });
   });
   return rows;
+}
+
+/** TMDB catalog rows for one section tab: items carry ids.tmdb + backdrop + overview + rating (full info pages). */
+async function tmdbTabRows(tab) {
+  const none = { rows: [], heroImage: null };
+  if (!tmdbReady()) return none;
+  const specs = tab === 'series' ? [
+    { id: 'tmdb-series-pop', title: '📺 Series populares', path: '/tv/popular', kind: 'series' },
+    { id: 'tmdb-series-top', title: '🏆 Mejor valoradas', path: '/tv/top_rated', kind: 'series' },
+    { id: 'tmdb-series-air', title: '📡 Al aire', path: '/tv/on_the_air', kind: 'series' }
+  ] : tab === 'anime' ? [
+    { id: 'tmdb-anime-trend', title: '⛩️ Anime en tendencia', path: '/discover/tv', kind: 'series', params: { with_genres: '16', sort_by: 'popularity.desc', with_original_language: 'ja' } },
+    { id: 'tmdb-anime-pop', title: '⭐ Anime popular', path: '/discover/tv', kind: 'series', params: { with_genres: '16', sort_by: 'popularity.desc' } }
+  ] : [
+    { id: 'tmdb-trend-movies', title: '🔥 Tendencias de la semana', path: '/trending/movie/week', kind: 'movie' },
+    { id: 'tmdb-now-playing', title: '🎬 En cartelera', path: '/movie/now_playing', kind: 'movie' },
+    { id: 'tmdb-pop-movies', title: '🌟 Populares', path: '/movie/popular', kind: 'movie' },
+    { id: 'tmdb-top-movies', title: '🏆 Mejor valoradas', path: '/movie/top_rated', kind: 'movie' }
+  ];
+  const settled = await mapLimit(specs, 4, (s) => tmdbFetch(s.path, s.params));
+  const rows = [];
+  let heroImage = null;
+  specs.forEach((s, i) => {
+    const j = settled[i] || null;
+    const items = tmdbRowsOf(j, s.kind);
+    if (items.length && !heroImage) heroImage = items.find((x) => x.backdrop) ? items.find((x) => x.backdrop).backdrop : null;
+    if (items.length) rows.push({ id: s.id, title: s.title, items: items.slice(0, 24), genre: tab });
+  });
+  log(`[section] tmdb ${tab}: ${rows.length} row(s)`);
+  return { rows, heroImage };
 }
 
 async function tmdbSearchIds(query) {
@@ -2204,7 +2333,7 @@ function tmdbNormTitle(s) {
 }
 
 async function tmdbEnrich(items, query) {
-  if (!tmdbKey() || !items.length) return items;
+  if (!tmdbReady() || !items.length) return items;
   let hits;
   try { hits = await tmdbSearchIds(query); } catch { return items; }
   if (!hits.length) return items;
@@ -2215,11 +2344,61 @@ async function tmdbEnrich(items, query) {
   }
   for (const it of items) {
     if (it.ids && it.ids.tmdb) continue;
-    const h = byTitle[tmdbNormTitle(stripYearSuffix(it.title))] || byTitle[tmdbNormTitle(it.title)];
+    const h = byTitle[tmdbNormTitle(tmdbQueryTitle(it.title))]
+      || byTitle[tmdbNormTitle(stripYearSuffix(it.title))]
+      || byTitle[tmdbNormTitle(it.title)];
     if (!h || h.kind !== (it.kind || 'movie')) continue;
     it.ids = { ...(it.ids || {}), tmdb: h.id };
     if (!it.year && h.year) it.year = h.year;
   }
+  return items;
+}
+
+/** Title → TMDB hit cache (per session) so reopening a section doesn't re-query the same titles. */
+const TMDB_LOOKUP = new Map();
+
+/**
+ * Fill in info-page fields Kino won't invent: ids.tmdb (drives synopsis/genres/rating/cast enrichment) and
+ * backdrop (only your answer counts). One TMDB search per missing title, bounded and cached. Never throws.
+ */
+async function enrichDetails(items, cap = 36) {
+  if (!tmdbReady() || !items || !items.length) return items;
+  const pending = items.filter((x) => x && x.title && !(x.ids && x.ids.tmdb));
+  let budget = cap;
+  await mapLimit(pending, 5, async (it) => {
+    if (FETCH_BUDGET <= 5) return;
+    const norm = tmdbNormTitle(tmdbQueryTitle(it.title));
+    if (!norm) return;
+    let hit = TMDB_LOOKUP.get(norm);
+    if (hit === undefined) {
+      if (budget <= 0) return;
+      budget--;
+      let j = null;
+      try {
+        j = await tmdbFetch('/search/multi', { query: tmdbQueryTitle(it.title), include_adult: 'false' });
+      } catch { j = null; }
+      if (!j || !Array.isArray(j.results)) return; // fallo transitorio: sin cachear, el próximo llamado reintenta
+      const want = it.kind === 'series' ? 'tv' : 'movie';
+      const list = j.results.filter((x) => x && x.id && x.media_type !== 'person');
+      const key = (x) => tmdbNormTitle(x.title || x.name);
+      hit = list.find((x) => x.media_type === want && key(x) === norm)
+         || list.find((x) => x.media_type === want && (key(x).includes(norm) || norm.includes(key(x))))
+         || null;
+      if (hit) {
+        hit = { id: hit.id, backdrop_path: hit.backdrop_path || null, poster_path: hit.poster_path || null,
+                overview: hit.overview || '', vote_average: hit.vote_average || 0,
+                date: (hit.release_date || hit.first_air_date || '') };
+      }
+      TMDB_LOOKUP.set(norm, hit);
+    }
+    if (!hit) return;
+    it.ids = { ...(it.ids || {}), tmdb: hit.id };
+    if (!it.backdrop && hit.backdrop_path) it.backdrop = tmdbImage(hit.backdrop_path, 'w780');
+    if (!it.overview && hit.overview) it.overview = cleanText(hit.overview);
+    if (!it.year && hit.date) it.year = hit.date.slice(0, 4);
+    if (!it.rating && hit.vote_average) it.rating = Math.round(hit.vote_average * 10) / 10;
+    if (!it.poster && hit.poster_path) it.poster = tmdbImage(hit.poster_path, 'w500');
+  });
   return items;
 }
 
@@ -2232,7 +2411,7 @@ async function tmdbCandidates(title, kind) {
   const target = tmdbNormTitle(title);
   const scored = [];
   for (let i = 0; i < settled.length; i++) {
-    const hits = settled[i].status === 'fulfilled' ? settled[i].value : [];
+    const hits = settled[i] || [];
     for (const h of hits) {
       if (!h || !h.ref || h.kind !== want) continue;
       const norm = tmdbNormTitle(h.title);
@@ -2349,6 +2528,24 @@ function stripYearSuffix(s) {
   return String(s || '').replace(/\s*[('(]?\b(?:19|20)\d{2}\b[)]?\s*$/, '').trim();
 }
 
+const TMDB_JUNK_END = /^(online|gratis|hd|fhd|en|sub|espa[nñ]ol|latino|castellano|descargar|calidad|completa)$/i;
+const TMDB_JUNK_START = /^(ver|mirar|watch|descargar)$/i;
+
+/** Site titles carry promo junk ("VER X Online Gratis HD - Película completa"); peel it for TMDB. */
+function tmdbQueryTitle(s) {
+  const base = stripYearSuffix(s);
+  const peeled = base
+    .replace(/\s*[-–—]?\s*pel[íi]cula\s+completa\s*$/i, '')
+    .replace(/\s*[-–—]?\s*serie\s+completa\s*$/i, '')
+    .trim();
+  const words = peeled.split(/\s+/).filter(Boolean);
+  let guard = 0;
+  while (words.length > 1 && guard++ < 5 && TMDB_JUNK_END.test(words[words.length - 1])) words.pop();
+  guard = 0;
+  while (words.length > 1 && guard++ < 3 && TMDB_JUNK_START.test(words[0])) words.shift();
+  return words.join(' ') || base;
+}
+
 function addToGroup(g, item) {
   if (g.seen.has(item.ref)) return;
   g.seen.add(item.ref);
@@ -2429,6 +2626,7 @@ function mergeAndRank(results, query) {
 
 export async function search(params) {
   await kino.sleep(0);
+  fetchBudgetReset();
   let query = '';
   if (typeof params === 'string') query = params.trim();
   else if (params && typeof params.q === 'string') query = params.q.trim();
@@ -2453,6 +2651,7 @@ export async function search(params) {
 
 export async function home() {
   await kino.sleep(0);
+  fetchBudgetReset();
   log('[home] loading rows');
 
   const rows = await tmdbHomeRows();
@@ -2487,6 +2686,7 @@ export async function home() {
 
 export async function section(param) {
   await kino.sleep(0);
+  fetchBudgetReset();
   let selectedTab = 'peliculas';
   if (typeof param === 'string' && param) selectedTab = param;
   else if (param && typeof param.tab === 'string' && param.tab) selectedTab = param.tab;
@@ -2498,13 +2698,16 @@ export async function section(param) {
     { id: 'anime', label: 'Anime' }
   ];
 
+  const HERO_FALLBACK = 'https://image.tmdb.org/t/p/original/kXfqcdQKsToO0OUXHcrrNCHDBzO.jpg';
   const hero = {
     title: 'YojaTV Cine y Series',
     text: 'El mejor catálogo en español latino: estrenos de cartelera, series completas y anime en emisión.',
-    image: 'https://image.tmdb.org/t/p/original/mKFLAevD84x6n6T91d1uD36gT6.jpg'
+    image: HERO_FALLBACK
   };
 
   const rows = [];
+  // TMDB catalog rows for this tab (rich: ids.tmdb + backdrop + overview) fetched alongside the source rows.
+  const tmdbP = tmdbTabRows(selectedTab);
 
   if (selectedTab === 'peliculas') {
     const list = [
@@ -2549,35 +2752,51 @@ export async function section(param) {
     });
   }
 
+  const tmdb = await tmdbP;
+  if (tmdb.heroImage) hero.image = tmdb.heroImage;
+  // Give source rows the info-page fields Kino won't invent (ids.tmdb drives synopsis/rating/genres/cast;
+  // backdrop only counts if we provide it). One round-robin pass so every row shares the bounded budget.
+  const cols = rows.map((r) => r.items);
+  const flat = [];
+  const maxLen = cols.reduce((m, c) => Math.max(m, c.length), 0);
+  for (let i = 0; i < maxLen; i++) for (const c of cols) if (c[i]) flat.push(c[i]);
+  await enrichDetails(flat, 36);
+  // TMDB rows first: they always carry full details and resolve via the n79 id fast path.
+  rows.unshift(...tmdb.rows);
+
   log(`[section] returned ${rows.length} rows for tab ${selectedTab}`);
   return { tabs, tab: selectedTab, hero, rows };
 }
 
 export async function categories() {
   await kino.sleep(0);
+  fetchBudgetReset();
   log('[categories] returning categories list');
   return [
-    { id: 'cat-peliculas', title: 'Películas de Estreno', ref: 'browse:movies', art: 'https://image.tmdb.org/t/p/w780/mKFLAevD84x6n6T91d1uD36gT6.jpg' },
-    { id: 'cat-series', title: 'Series de TV', ref: 'browse:series', art: 'https://image.tmdb.org/t/p/w780/9faGSFi5jam6pDWGNdcu8R8Gv5v.jpg' },
-    { id: 'cat-anime', title: 'Anime Japonés', ref: 'browse:anime', art: 'https://image.tmdb.org/t/p/w780/kXfqcdQKsToO0OUXHcrrNCHDBzO.jpg' },
-    { id: 'cat-accion', title: 'Acción y Aventura', ref: 'browse:action', art: 'https://image.tmdb.org/t/p/w780/mKFLAevD84x6n6T91d1uD36gT6.jpg' },
-    { id: 'cat-terror', title: 'Terror y Suspenso', ref: 'browse:horror', art: 'https://image.tmdb.org/t/p/w780/9faGSFi5jam6pDWGNdcu8R8Gv5v.jpg' }
+    { id: 'cat-peliculas', title: 'Películas de Estreno', ref: 'browse:movies', art: 'https://image.tmdb.org/t/p/w780/eZ239CUp1d6OryZEBPnO2n87gMG.jpg' },
+    { id: 'cat-series', title: 'Series de TV', ref: 'browse:series', art: 'https://image.tmdb.org/t/p/w780/tsRy63Mu5cu8etL1X7ZLyf7UP1M.jpg' },
+    { id: 'cat-anime', title: 'Anime Japonés', ref: 'browse:anime', art: 'https://image.tmdb.org/t/p/w780/rqbCbjB19amtOtFQbb3K2lgm2zv.jpg' },
+    { id: 'cat-accion', title: 'Acción y Aventura', ref: 'browse:action', art: 'https://image.tmdb.org/t/p/w780/gqrnQA6Xppdl8vIb2eJc58VC1tW.jpg' },
+    { id: 'cat-terror', title: 'Terror y Suspenso', ref: 'browse:horror', art: 'https://image.tmdb.org/t/p/w780/ecKQlAEG95k62SMGhvX83oEqANK.jpg' }
   ];
 }
 
 export async function settingsStatus() {
+  const kt = typeof kino.tmdb === 'function';
   const hasKey = !!tmdbKey();
+  const ready = kt || hasKey;
   const lang = tmdbLang();
   const src = tmdbWantSourceRows();
   const lines = [];
-  lines.push(hasKey ? 'Catálogo TMDB activo (' + lang + ')' : 'Sin API key de TMDB: el catálogo usa solo las fuentes');
+  lines.push(ready ? (kt ? 'Catálogo TMDB activo · llave de Kino (' + lang + ')' : 'Catálogo TMDB activo (' + lang + ')') : 'Sin API key de TMDB: el catálogo usa solo las fuentes');
   lines.push(src ? 'Filas de fuentes: activadas' : 'Filas de fuentes: ocultas');
-  lines.push(hasKey ? 'Búsqueda enriquecida con TMDb' : 'Pega tu API key para mejorar el catálogo');
+  lines.push(ready ? (kt ? 'Búsqueda enriquecida con TMDb (sin llave propia)' : 'Búsqueda enriquecida con TMDb') : 'Pega tu API key para mejorar el catálogo');
   return { estado: lines.join(' · ') };
 }
 
 export async function browse(params) {
   await kino.sleep(0);
+  fetchBudgetReset();
   let ref = '';
   if (typeof params === 'string') ref = params;
   else if (params && typeof params.cursor === 'string') ref = params.cursor;
@@ -2642,6 +2861,7 @@ export async function browse(params) {
 
 export async function episodes(params) {
   await kino.sleep(0);
+  fetchBudgetReset();
   let ref = '';
   if (typeof params === 'string') ref = params;
   else if (params && typeof params.ref === 'string') ref = params.ref;
@@ -2688,6 +2908,7 @@ async function resolveOneRef(ref) {
 
 export async function resolve(params) {
   await kino.sleep(0);
+  fetchBudgetReset();
   let ref = '';
   if (typeof params === 'string') ref = params;
   else if (params && typeof params.ref === 'string') ref = params.ref;
@@ -2711,7 +2932,14 @@ export async function resolve(params) {
       const s = settled[i];
       if (s && s.url) {
         const sid = refs[i].split(':')[0];
-        streams.push({ ...s, label: (SOURCES[sid] && SOURCES[sid].label) || sid });
+        const name = (SOURCES[sid] && SOURCES[sid].label) || sid;
+        let q = null;
+        if (typeof s.label === 'string') {
+          const m = /^(\d{3,4}p)\b/.exec(s.label.trim());
+          if (m) q = m[1];
+        }
+        if (!q) q = qualityFromUrl(s.url);
+        streams.push({ ...s, label: srvLabel(q, name) || name });
       }
     }
     if (!streams.length) {
@@ -2721,7 +2949,7 @@ export async function resolve(params) {
     const primary = streams[0];
     const alts = streams.slice(1, 6).map((s) => ({ label: s.label || 'Servidor', url: s.url, ...(s.headers ? { headers: s.headers } : {}) }));
     log(`[resolve OK] merged resolved via ${streams.length} source(s): ${primary.url}`);
-    return { url: primary.url, ...(primary.headers ? { headers: primary.headers } : {}), ...(alts.length ? { alternatives: alts } : {}) };
+    return { url: primary.url, label: primary.label, ...(primary.headers ? { headers: primary.headers } : {}), ...(alts.length ? { alternatives: alts } : {}) };
   }
 
   const sid = ref.includes(':') ? ref.split(':')[0] : (SOURCES[ref] ? ref : 'cv');
@@ -2735,5 +2963,5 @@ export async function resolve(params) {
     throw kino.error('unavailable', 'No se encontró un servidor de reproducción');
   }
   log(`[resolve OK] stream resolved: ${stream.url}`);
-  return stream;
+  return labelStream(stream, SOURCES[sid].label || sid);
 }

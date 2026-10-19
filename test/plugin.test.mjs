@@ -96,3 +96,37 @@ test('an empty query returns an empty list', async () => {
   const items = await plugin.search('');
   assert.deepEqual(items, []);
 });
+
+test('kino.tmdb (Kino 0.9.53+): catalog and details with no person key', async () => {
+  const calls = [];
+  const fake = async (path, params) => {
+    calls.push({ path, params });
+    return {
+      results: [{
+        id: 4242, media_type: 'movie', title: 'Pelis Falsa', overview: 'Resumen falso',
+        backdrop_path: '/bk.jpg', poster_path: '/bp.jpg', vote_average: 8.1,
+        release_date: '2024-02-03', adult: false
+      }]
+    };
+  };
+  const real = globalThis.kino;
+  globalThis.kino = { ...real, tmdb: fake };
+  try {
+    const sec = await plugin.section('peliculas');
+    assert.ok(calls.length >= 4, 'kino.tmdb must answer the catalog rows');
+    for (const c of calls) {
+      assert.ok(c.path.startsWith('/') && !c.path.includes('/3'), 'path is a v3 path without /3');
+      assert.ok(c.params && typeof c.params === 'object', 'params is an object');
+      assert.ok(!('api_key' in c.params), 'kino.tmdb must never receive api_key');
+      assert.ok(c.params.language, 'language is passed');
+    }
+    const tmdbRow = sec.rows.find((r) => String(r.id).startsWith('tmdb-'));
+    assert.ok(tmdbRow, 'a TMDB row exists without any API key');
+    const it = tmdbRow.items[0];
+    assert.equal(it.ids && it.ids.tmdb, 4242, 'items carry ids.tmdb');
+    assert.ok(it.overview, 'items carry overview');
+    assert.ok(sec.hero.image.includes('/w780/bk.jpg'), 'hero uses the TMDB backdrop');
+  } finally {
+    globalThis.kino = real;
+  }
+});
