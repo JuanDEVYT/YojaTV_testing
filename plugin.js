@@ -79,7 +79,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '5.1.0';
+const PLUGIN_VERSION = '5.1.1';
 
 function log(...args) {
   try {
@@ -2288,7 +2288,16 @@ registerSource({
     return { episodes: [] };
   },
   async resolve(path) {
-    const { kind, title } = tmdbSplit(path);
+    const { kind, id, title } = tmdbSplit(path);
+    // Fast path: n79 resolves straight from the TMDB id in a single request.
+    if (id && kind !== 'series') {
+      let st;
+      try { st = await SOURCES.n79.resolve('movie:' + id); } catch { st = null; }
+      if (st && st.url) {
+        log(`[tmdb] resolved "${title || id}" via n79 (id ${id})`);
+        return st;
+      }
+    }
     if (!title) return null;
     const cands = await tmdbCandidates(title, kind === 'series' ? 'series' : 'movie');
     for (const c of cands) {
