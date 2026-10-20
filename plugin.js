@@ -137,17 +137,12 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '5.2.0';
+const PLUGIN_VERSION = '5.3.0';
 
 function log(...args) {
   try {
     if (typeof kino !== 'undefined' && kino.log) {
       kino.log(`[YojaTV v${PLUGIN_VERSION}]`, ...args);
-    }
-  } catch {}
-  try {
-    if (typeof console !== 'undefined' && console.log) {
-      console.log(`[YojaTV v${PLUGIN_VERSION}]`, ...args);
     }
   } catch {}
 }
@@ -159,7 +154,7 @@ log(`Iniciando plugin YojaTV v${PLUGIN_VERSION} - Por JuandreXter, YojanderGamin
 let FETCH_BUDGET = 60;
 function fetchBudgetReset() { FETCH_BUDGET = 60; }
 
-async function fetchText(url, headers) {
+async function fetchText(url, headers, timeoutMs) {
   if (FETCH_BUDGET <= 0) {
     log(`[HTTP GET BUDGET] cupo de 60 por llamada agotado <- ${url}`);
     return { ok: false, status: 0, text: '', budget: true };
@@ -167,7 +162,10 @@ async function fetchText(url, headers) {
   FETCH_BUDGET--;
   log(`[HTTP GET] -> ${url}`);
   try {
-    const res = await kino.fetch(url, { headers: { ...HEADERS, ...(headers || {}) } });
+    const opts = { headers: { ...HEADERS, ...(headers || {}) } };
+    const t = Math.trunc(Number(timeoutMs));
+    if (Number.isFinite(t) && t > 0) opts.timeoutMs = Math.min(t, 30000);
+    const res = await kino.fetch(url, opts);
     if (!res.ok) {
       log(`[HTTP GET FAIL] ${res.status} <- ${url}`);
       return { ok: false, status: res.status, text: '' };
@@ -392,6 +390,62 @@ async function resolveEmbed69(pageText, referer) {
   return null;
 }
 
+/* ---------- resolve stream collection ---------- */
+// Lower is better. Host penalties first: a vimeos/goodstream URL is only offered
+// when nothing healthier settled in time.
+function streamScore(u) {
+  if (u.includes('goodstream.one') || u.includes('goodstream.uno')) return 20;
+  if (u.includes('vimeos.net') || u.includes('vimeos.zip')) return 15;
+  if (/\.mp4(\?|$)/i.test(u)) return 1;
+  if (/\.m3u8(\?|$)/i.test(u)) return 3;
+  return 5;
+}
+
+// Reachability check run ON THE DEVICE, on the same network the player will use:
+// a CDN that answers the player's manifest request with 403 answers this HEAD
+// with 403 too, while a plain fetch from another network may still pass.
+async function probeUrl(url, headers) {
+  try {
+    const res = await kino.fetch(url, { method: 'HEAD', headers: { ...HEADERS, ...(headers || {}) }, timeoutMs: 8000 });
+    if (res && res.ok) return true;
+    // Some hosts reject HEAD itself (405/501): no verdict, treat as reachable.
+    if (res && (res.status === 405 || res.status === 501)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+// Runs every probe in parallel and STOPS WAITING at the first healthy stream
+// (a health-checked URL or a low-score one), so one server that hangs — goodstream
+// used to block an entire resolve for 15 s — no longer stalls the answer. The
+// remaining probes keep running under their own timeoutMs but are not awaited.
+async function collectStreams(probes) {
+  const pending = probes.map((p) => Promise.resolve(p).then((v) => v, () => null));
+  const results = [];
+  while (pending.length > 0) {
+    const raced = pending.map((p) => p.then((v) => ({ p, v })));
+    const done = await Promise.race(raced);
+    const i = pending.indexOf(done.p);
+    if (i >= 0) pending.splice(i, 1);
+    const st = done.v;
+    if (!st || !st.url) continue;
+    if (results.some((x) => x.url === st.url)) {
+      if (st.probe === true || streamScore(st.url) <= 5) break;
+      continue;
+    }
+    results.push(st);
+    if (st.probe === true || streamScore(st.url) <= 5) break;
+  }
+  return results
+    .sort((a, b) => streamScore(a.url) - streamScore(b.url))
+    .map((s) => {
+      const clean = {};
+      for (const k in s) if (k !== 'probe') clean[k] = s[k];
+      return clean;
+    });
+}
+
 async function resolveEmbedUrl(embedUrl, referer) {
   if (!embedUrl || typeof embedUrl !== 'string') return null;
   let u = embedUrl.trim();
@@ -419,28 +473,46 @@ async function resolveEmbedUrl(embedUrl, referer) {
   }
 
   if (u.includes('vimeos.net') || u.includes('vimeos.zip')) {
-    const v = await fetchText(u, { Referer: referer || 'https://vimeos.net/' });
+    const v = await fetchText(u, { Referer: referer || 'https://vimeos.net/' }, 12000);
     if (v.ok) {
       const unpacked = extractPackedJs(v.text);
       const m3u = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
-      if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
+      if (m3u) {
+        // On some networks the player gets 403 on this CDN while a plain fetch
+        // passes: only offer a vimeos stream that answers a HEAD from this device.
+        const headers = { 'User-Agent': UA, Referer: u };
+        if (await probeUrl(m3u[1], headers)) return { url: m3u[1], headers, probe: true };
+        log(`[vimeos] manifiesto no responde desde este dispositivo <- ${u}`);
+        return null;
+      }
       const mp4 = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
       if (mp4 && !mp4[1].includes('bigbuckbunny') && !mp4[1].includes('test-videos')) {
-        return { url: mp4[1], headers: { 'User-Agent': UA, 'Referer': 'https://vimeos.net/' } };
+        const headers = { 'User-Agent': UA, Referer: u };
+        if (await probeUrl(mp4[1], headers)) return { url: mp4[1], headers, probe: true };
+        log(`[vimeos] mp4 no responde desde este dispositivo <- ${u}`);
+        return null;
       }
     }
     return null;
   }
 
   if (u.includes('goodstream.one') || u.includes('goodstream.uno')) {
-    const g = await fetchText(u, { Referer: referer || 'https://goodstream.one/' });
+    const g = await fetchText(u, { Referer: referer || 'https://goodstream.one/' }, 6000);
     if (g.ok) {
       const unpacked = extractPackedJs(g.text);
       const m3u = (unpacked || g.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
-      if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': 'https://goodstream.one/' } };
+      if (m3u) {
+        const headers = { 'User-Agent': UA, Referer: 'https://goodstream.one/' };
+        if (await probeUrl(m3u[1], headers)) return { url: m3u[1], headers, probe: true };
+        log(`[goodstream] manifiesto no responde <- ${u}`);
+        return null;
+      }
       const mp4 = (unpacked || g.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
       if (mp4 && !mp4[1].includes('bigbuckbunny') && !mp4[1].includes('test-videos')) {
-        return { url: mp4[1], headers: { 'User-Agent': UA, 'Referer': 'https://goodstream.one/' } };
+        const headers = { 'User-Agent': UA, Referer: 'https://goodstream.one/' };
+        if (await probeUrl(mp4[1], headers)) return { url: mp4[1], headers, probe: true };
+        log(`[goodstream] mp4 no responde <- ${u}`);
+        return null;
       }
     }
     return null;
@@ -536,7 +608,7 @@ async function resolveEmbedUrl(embedUrl, referer) {
 
   // Generic embed inspection
   try {
-    const gen = await fetchText(u, { Referer: referer });
+    const gen = await fetchText(u, { Referer: referer }, 10000);
     if (gen.ok) {
       // Check for VOE pattern on unbranded mirror
       const payloadM = gen.text.match(/json">\["([^"]+)"]<\/script>\s*<script\s*src="([^"]+)/);
@@ -652,17 +724,8 @@ registerSource({
       return (st && st.url) ? { label: 'VPO ' + nume, ...st } : null;
     });
 
-    const settled = await Promise.allSettled(postTasks);
-    const streams = settled.filter((s) => s.status === 'fulfilled' && s.value && s.value.url).map((s) => s.value);
+    const streams = await collectStreams(postTasks);
     if (streams.length === 0) return null;
-
-    streams.sort((a, b) => {
-      const aDir = /\.(m3u8|mp4)($|\?)/i.test(a.url);
-      const bDir = /\.(m3u8|mp4)($|\?)/i.test(b.url);
-      if (aDir && !bDir) return -1;
-      if (!aDir && bDir) return 1;
-      return 0;
-    });
 
     const primary = streams[0];
     const alts = streams.slice(1, 8).map((s) => ({
@@ -781,8 +844,7 @@ registerSource({
       return null;
     });
 
-    const settled = await Promise.allSettled(serverTasks);
-    const streams = settled.filter((x) => x.status === 'fulfilled' && x.value && x.value.url).map((x) => x.value);
+    const streams = await collectStreams(serverTasks);
     if (streams.length === 0) return null;
 
     const primary = streams[0];
@@ -883,22 +945,9 @@ registerSource({
     while ((om = optRe.exec(r.text)) !== null) opts.push(om[1]);
     if (opts.length === 0) return null;
 
-    const settled = await Promise.allSettled(opts.map((opt) => resolveEmbedUrl(opt, url)));
-    const streams = settled
-      .filter((x) => x.status === 'fulfilled' && x.value && x.value.url)
-      .map((x) => x.value);
+    const streams = await collectStreams(opts.map((opt) => resolveEmbedUrl(opt, url)));
 
     if (streams.length === 0) return null;
-
-    streams.sort((a, b) => {
-      const score = (u) => {
-        if (u.includes('goodstream.one')) return 20;
-        if (u.includes('vimeos.net') || u.includes('vimeos.zip')) return 10;
-        if (/\.mp4(\?|$)/i.test(u)) return 1;
-        return 5;
-      };
-      return score(a.url) - score(b.url);
-    });
 
     const primary = streams[0];
     const alts = streams.slice(1, 8).map((st, i) => ({
@@ -990,25 +1039,8 @@ registerSource({
       return resolveEmbedUrl(target.startsWith('//') ? 'https:' + target : target, playUrl);
     }
 
-    const settled = await Promise.allSettled(playMatches.map((pu) => resolvePlay(pu)));
-    const streams = [];
-    for (const r of settled) {
-      if (r.status === 'fulfilled' && r.value && r.value.url && !streams.some((x) => x.url === r.value.url)) {
-        streams.push(r.value);
-      }
-    }
+    const streams = await collectStreams(playMatches.map((pu) => resolvePlay(pu)));
     if (streams.length === 0) return null;
-
-    streams.sort((a, b) => {
-      // Score: lower is better. Deprioritize CDNs that block Android/ExoPlayer.
-      const score = (u) => {
-        if (u.includes('goodstream.one')) return 20;  // often times out
-        if (u.includes('vimeos.net') || u.includes('vimeos.zip')) return 10;  // needs Windows Chrome UA
-        if (/\.mp4(\?|$)/i.test(u)) return 1;  // direct MP4 is best
-        return 5;
-      };
-      return score(a.url) - score(b.url);
-    });
 
     const primary = streams[0];
     const alts = streams.slice(1, 8).map((st, i) => ({
@@ -1255,8 +1287,7 @@ registerSource({
       return null;
     }
 
-    const settled = await Promise.allSettled(opts.map((o) => resolveOpt(o)));
-    const streams = settled.filter((x) => x.status === 'fulfilled' && x.value).map((x) => x.value);
+    const streams = await collectStreams(opts.map((o) => resolveOpt(o)));
     if (streams.length === 0) return null;
     return {
       url: streams[0].url,
@@ -1365,8 +1396,7 @@ registerSource({
       return null;
     }
 
-    const settled = await Promise.allSettled(opts.map((o) => resolveOpt(o)));
-    const resolved = settled.filter((x) => x.status === 'fulfilled' && x.value).map((x) => x.value);
+    const resolved = await collectStreams(opts.map((o) => resolveOpt(o)));
 
     if (resolved.length > 0) {
       const primary = resolved[0];
@@ -1831,8 +1861,7 @@ registerSource({
       return null;
     }
 
-    const settled = await Promise.allSettled(toResolve.map((s) => resolveAfvServer(s)));
-    const streams = settled.filter((x) => x.status === 'fulfilled' && x.value).map((x) => x.value);
+    const streams = await collectStreams(toResolve.map((s) => resolveAfvServer(s)));
     if (streams.length === 0) return null;
     return { url: streams[0].url, alternatives: streams.slice(1, 8).map((s) => ({ label: s.label, url: s.url })) };
   }
@@ -2053,8 +2082,7 @@ registerSource({
     if (!r.ok) return null;
     const dataUrls = [...r.text.matchAll(/data-url="([^"]+)"/g)].map((m) => m[1]);
     if (dataUrls.length > 0) {
-      const settled = await Promise.allSettled(dataUrls.map((du) => resolveEmbedUrl(du, url)));
-      const resolved = settled.filter((x) => x.status === 'fulfilled' && x.value && x.value.url).map((x) => x.value);
+      const resolved = await collectStreams(dataUrls.map((du) => resolveEmbedUrl(du, url)));
       if (resolved.length > 0) {
         const primary = resolved[0];
         return {

@@ -130,3 +130,74 @@ test('kino.tmdb (Kino 0.9.53+): catalog and details with no person key', async (
     globalThis.kino = real;
   }
 });
+
+// Fake kino.fetch answering a Hackstore page whose servers are vimeos + goodstream
+// (+ optionally voe). goodstreamHs: when true the goodstream embed NEVER answers,
+// reproducing the "server hangs and the whole resolve waited 15 s" stall.
+function hsFakeFetch({ vimeosHeadOk, goodstreamHs, withVoe }) {
+  const respond = (url, opts) => {
+    if (url.startsWith('https://www.hackstore.fo/peliculas/peli-falsa/')) {
+      return {
+        ok: true, status: 200, url,
+        text: () => '<a href="play.php?u=AAAA&b=BBBB">a</a><a href="play.php?u=CCCC&b=DDDD">b</a>' +
+          (withVoe ? '<a href="play.php?u=EEEE&b=FFFF">c</a>' : '')
+      };
+    }
+    if (url.includes('play.php?u=AAAA')) return { ok: true, status: 200, url, text: () => "<script>location.href='https://vimeos.net/embed-xyz.html'</script>" };
+    if (url.includes('play.php?u=CCCC')) return { ok: true, status: 200, url, text: () => "<script>location.href='https://goodstream.one/embed-xyz.html'</script>" };
+    if (url.includes('play.php?u=EEEE')) return { ok: true, status: 200, url, text: () => "<script>location.href='https://voe.sx/e/abc123'</script>" };
+    if (url.includes('vimeos.net/embed-xyz.html')) {
+      return { ok: true, status: 200, url, text: () => '<script>sources:["https://s1.vimeos.net/hls2/01/00001/xyz_,n,.urlset/master.m3u8?t=abc&s=1&e=2"]</script>' };
+    }
+    if (opts && opts.method === 'HEAD' && url.includes('vimeos.net/hls2')) {
+      return { ok: !!vimeosHeadOk, status: vimeosHeadOk ? 200 : 403, url, text: () => '' };
+    }
+    if (url.includes('goodstream.one/embed-xyz.html') && goodstreamHs) {
+      return new Promise(() => {}); // never answers: the old stall
+    }
+    if (url.includes('goodstream.one/embed-xyz.html')) {
+      return { ok: true, status: 200, url, text: () => '<script>file:"https://goodstream.one/dl/fake.mp4"</script>' };
+    }
+    if (url.includes('voe.sx/e/abc123')) {
+      return { ok: true, status: 200, url, text: () => 'sources:[{src:"https://fakecdn.example/v/master.m3u8"}]' };
+    }
+    return { ok: false, status: 404, url, text: () => '' };
+  };
+  return async (url, opts) => respond(url, opts);
+}
+
+test('resolve does not wait for a hanging server (early-exit collector)', async () => {
+  const real = globalThis.kino;
+  globalThis.kino = { ...real, fetch: hsFakeFetch({ vimeosHeadOk: true, goodstreamHs: true, withVoe: false }) };
+  try {
+    const t0 = Date.now();
+    const out = await Promise.race([
+      plugin.resolve({ ref: 'hs:peliculas:peli-falsa' }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('resolve se quedó esperando al servidor colgado')), 12000))
+    ]);
+    const elapsed = Date.now() - t0;
+    assert.ok(out && out.url, 'resolve must return a stream');
+    assert.ok(out.url.includes('vimeos.net'), 'the healthy server wins');
+    assert.ok(elapsed < 8000, 'must not wait for the hung server, took ' + elapsed + 'ms');
+  } finally {
+    globalThis.kino = real;
+  }
+});
+
+test('a vimeos stream whose manifest 403s on this device is skipped', async () => {
+  const real = globalThis.kino;
+  globalThis.kino = { ...real, fetch: hsFakeFetch({ vimeosHeadOk: false, goodstreamHs: false, withVoe: true }) };
+  try {
+    const out = await Promise.race([
+      plugin.resolve({ ref: 'hs:peliculas:peli-falsa' }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('resolve demasiado lento')), 12000))
+    ]);
+    assert.ok(out && out.url, 'resolve must return a stream');
+    assert.ok(!out.url.includes('vimeos'), '403-ing vimeos must not be the primary');
+    const all = JSON.stringify(out);
+    assert.ok(!all.includes('vimeos.net'), 'nor an alternative');
+    assert.ok(out.url.includes('fakecdn.example') || out.url.includes('goodstream'), 'another server wins instead');
+  } finally {
+    globalThis.kino = real;
+  }
+});
