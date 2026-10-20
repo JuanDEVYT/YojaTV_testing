@@ -10,8 +10,17 @@ const fixturesPath = './test/fixtures.json';
 const hasFixtures = existsSync(fixturesPath);
 const tape = hasFixtures ? JSON.parse(readFileSync(fixturesPath, 'utf8')) : [];
 
-const { kino } = createKino(manifest, hasFixtures ? { replay: fixturesPath } : {});
+const kit = createKino(manifest, hasFixtures ? { replay: fixturesPath } : {});
+const { kino } = kit;
 globalThis.kino = kino;
+
+// The shim counts kino.fetch per process (60 max) and caches TMDB responses in
+// storage: every test that drives the catalog must start from a clean budget and
+// cache, or it fails based on what ran before it.
+function freshCatalogCall() {
+  kit.resetBudget();
+  for (const k of kino.storage.keys()) if (String(k).startsWith('tmdb:')) kino.storage.remove(k);
+}
 
 const plugin = await import('../plugin.js');
 
@@ -232,8 +241,9 @@ test('n79: a 429-ing CDN is not offered (probe rejects the stream)', async () =>
   try {
     await assert.rejects(
       () => plugin.resolve({ ref: 'n79:movie:1561726' }),
-      (e) => e && e.code === 'unavailable',
-      'a dead CDN must surface as unavailable, never as a broken stream'
+      (e) => e && e.code === 'unavailable' &&
+        e.userMessage === 'Este título no se ha encontrado en YojaTV',
+      'a dead CDN must surface as the friendly user message, never as a broken stream'
     );
   } finally {
     globalThis.kino = real;
@@ -279,6 +289,79 @@ test('a mp4 smaller than 15MB is rejected as bait (fake intro)', async () => {
       (e) => e && e.code === 'unavailable',
       'a 2.5MB fake intro must never reach the player'
     );
+  } finally {
+    globalThis.kino = real;
+  }
+});
+
+// Catálogo sin títulos sin estrenar: fecha de estreno FUTURA oculta el título en
+// búsqueda; un estreno reciente (con stream o sin él) sigue visible. Decisión del
+// usuario: Street Fighter (PelisPlusHD) se muestra; lo no estrenado no.
+test('search hides titles TMDB marks as not yet released', { skip: !hasFixtures }, async () => {
+  freshCatalogCall();
+  const real = globalThis.kino;
+  const fake = async (path, params) => {
+    if (path === '/search/multi') {
+      return { results: [
+        { id: 777001, media_type: 'movie', title: 'Batman & Robin', release_date: '2027-05-01', adult: false, vote_average: 5, overview: '' },
+        { id: 777002, media_type: 'movie', title: 'Batman: Año Uno', release_date: '2026-10-16', adult: false, vote_average: 7, overview: '' }
+      ] };
+    }
+    return { results: [] };
+  };
+  globalThis.kino = { ...real, tmdb: fake };
+  try {
+    const items = await plugin.search('batman');
+    assert.ok(!items.some((it) => it.title === 'Batman & Robin'), 'the not-yet-released title must be hidden');
+    assert.ok(items.some((it) => it.title === 'Batman: Año Uno'), 'a recently premiered title must stay visible');
+    assert.ok(items.some((it) => it.title === 'Batman Returns'), 'released titles must stay visible');
+  } finally {
+    globalThis.kino = real;
+  }
+});
+
+test('section hides TMDB catalog items whose release is still in the future', async () => {
+  freshCatalogCall();
+  const real = globalThis.kino;
+  const fake = async (path, params) => ({
+    results: [
+      { id: 888001, media_type: 'movie', title: 'Reciente Estreno', overview: '', adult: false,
+        backdrop_path: '/rt.jpg', poster_path: '/rt2.jpg', vote_average: 7, release_date: '2026-10-16' },
+      { id: 888002, media_type: 'movie', title: 'Estreno Futuro', overview: '', adult: false,
+        backdrop_path: '/up.jpg', poster_path: '/up2.jpg', vote_average: 7, release_date: '2027-01-15' }
+    ]
+  });
+  globalThis.kino = { ...real, tmdb: fake };
+  try {
+    const sec = await plugin.section('peliculas');
+    const tmdbItems = sec.rows.filter((r) => String(r.id).startsWith('tmdb-')).flatMap((r) => r.items);
+    assert.ok(tmdbItems.some((it) => it.title === 'Reciente Estreno'), 'a premiered TMDB item must stay visible');
+    assert.ok(!tmdbItems.some((it) => it.title === 'Estreno Futuro'), 'a future release must not appear');
+    assert.ok(sec.hero.image, 'the hero keeps a usable image');
+  } finally {
+    globalThis.kino = real;
+  }
+});
+
+// Un resolve TMDB caminaba decenas de candidatos (Street Fighter: 35) hasta vaciar
+// el cupo de 60 kino.fetch de una sola llamada.
+test('tmdb resolve caps candidates at 10 so the fetch budget survives', { skip: !hasFixtures }, async () => {
+  freshCatalogCall();
+  const real = globalThis.kino;
+  const lines = [];
+  globalThis.kino = { ...real, log: (...a) => { lines.push(a.join(' ')); } };
+  try {
+    await assert.rejects(
+      () => plugin.resolve({ ref: 'tmdb:movie:1:batman' }),
+      (e) => e && e.code === 'unavailable',
+      'nothing resolves offline: this test only measures the candidate walk'
+    );
+    const c = lines.find((l) => l.includes('[tmdb] "batman" (movie):'));
+    assert.ok(c, 'the candidate count must be logged');
+    const m = /(\d+) candidate\(s\)/.exec(c);
+    assert.ok(m && +m[1] > 0, 'candidates were scored');
+    assert.ok(+m[1] <= 10, 'at most 10 candidates may be walked, got ' + (m && m[1]));
+    assert.ok(lines.some((l) => l.includes('candidatos recortados')), 'the caps must engage on a franchise query');
   } finally {
     globalThis.kino = real;
   }

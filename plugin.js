@@ -137,7 +137,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '5.3.2';
+const PLUGIN_VERSION = '5.3.3';
 
 function log(...args) {
   try {
@@ -153,6 +153,21 @@ log(`Iniciando plugin YojaTV v${PLUGIN_VERSION} - Por JuandreXter, YojanderGamin
 // stops before the engine rejects everything else in the same call.
 let FETCH_BUDGET = 60;
 function fetchBudgetReset() { FETCH_BUDGET = 60; }
+
+// Películas sin estreno (fecha TMDB futura): ocultas del catálogo porque ninguna
+// fuente las tiene. Los estrenos recientes SÍ se muestran (decisión del usuario:
+// Street Fighter está en PelisPlusHD); si un título no tiene stream, el resolve
+// responde con el userMessage "Este título no se ha encontrado en YojaTV".
+function isUpcomingDate(v) {
+  if (!v || typeof v !== 'string') return false;
+  const t = Date.parse(v.slice(0, 10));
+  return Number.isFinite(t) && t > Date.now();
+}
+
+function futureYear(y) {
+  const n = parseInt(y, 10);
+  return Number.isFinite(n) && n > new Date().getFullYear();
+}
 
 async function fetchText(url, headers, timeoutMs) {
   if (FETCH_BUDGET <= 0) {
@@ -2350,7 +2365,9 @@ function tmdbItem(x, kind) {
 
 function tmdbRowsOf(j, kind) {
   if (!j || !Array.isArray(j.results)) return [];
-  return j.results.filter((x) => x && x.id && !x.adult).map((x) => tmdbItem(x, kind));
+  return j.results
+    .filter((x) => x && x.id && !x.adult && !isUpcomingDate(x.release_date || x.first_air_date || ''))
+    .map((x) => tmdbItem(x, kind));
 }
 
 async function tmdbHomeRows() {
@@ -2361,8 +2378,7 @@ async function tmdbHomeRows() {
     { id: 'tmdb-popular-series', title: '📺 Series populares', path: '/tv/popular', kind: 'series', genre: 'series' },
     { id: 'tmdb-trend-anime', title: '⛩️ Anime en tendencia', path: '/discover/tv', kind: 'series', genre: 'anime', params: { with_genres: '16', sort_by: 'popularity.desc', 'with_original_language': 'ja' } },
     { id: 'tmdb-now-playing', title: '🎬 En cartelera', path: '/movie/now_playing', kind: 'movie', genre: 'peliculas' },
-    { id: 'tmdb-top-series', title: '🏆 Mejor valoradas', path: '/tv/top_rated', kind: 'series', genre: 'series' },
-    { id: 'tmdb-upcoming', title: '📅 Próximos estrenos', path: '/movie/upcoming', kind: 'movie', genre: 'peliculas' }
+    { id: 'tmdb-top-series', title: '🏆 Mejor valoradas', path: '/tv/top_rated', kind: 'series', genre: 'series' }
   ];
   const settled = await mapLimit(specs, 4, (s) => tmdbFetch(s.path, s.params));
   specs.forEach((s, i) => {
@@ -2410,7 +2426,7 @@ async function tmdbSearchIds(query) {
   const out = [];
   for (const x of j.results) {
     if (!x || !x.id || x.media_type === 'person') continue;
-    out.push({ kind: x.media_type === 'tv' ? 'series' : 'movie', id: x.id, title: cleanText(x.name || x.title || ''), year: (x.release_date || x.first_air_date || '').slice(0, 4) });
+    out.push({ kind: x.media_type === 'tv' ? 'series' : 'movie', id: x.id, title: cleanText(x.name || x.title || ''), year: (x.release_date || x.first_air_date || '').slice(0, 4), date: (x.release_date || x.first_air_date || '') });
   }
   return out;
 }
@@ -2427,14 +2443,20 @@ async function tmdbEnrich(items, query) {
   const byTitle = {};
   for (const h of hits) {
     const k = tmdbNormTitle(h.title);
-    if (k && !byTitle[k]) byTitle[k] = h;
+    if (k) (byTitle[k] = byTitle[k] || []).push(h);
   }
-  for (const it of items) {
-    if (it.ids && it.ids.tmdb) continue;
-    const h = byTitle[tmdbNormTitle(tmdbQueryTitle(it.title))]
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (futureYear(it.year)) { items.splice(i, 1); continue; }
+    const list = byTitle[tmdbNormTitle(tmdbQueryTitle(it.title))]
       || byTitle[tmdbNormTitle(stripYearSuffix(it.title))]
-      || byTitle[tmdbNormTitle(it.title)];
+      || byTitle[tmdbNormTitle(it.title)] || null;
+    // Same-year hit first: a shared title ("Batman" 1966 vs 2027) must never date the wrong work.
+    const h = !list ? null
+      : (!it.year ? list[0] : list.find((x) => x.year === it.year) || list.find((x) => !x.year) || null);
     if (!h || h.kind !== (it.kind || 'movie')) continue;
+    if (isUpcomingDate(h.date)) { items.splice(i, 1); continue; }
+    if (it.ids && it.ids.tmdb) continue;
     it.ids = { ...(it.ids || {}), tmdb: h.id };
     if (!it.year && h.year) it.year = h.year;
   }
@@ -2479,6 +2501,11 @@ async function enrichDetails(items, cap = 36) {
       TMDB_LOOKUP.set(norm, hit);
     }
     if (!hit) return;
+    // Oculto del catálogo (sin fecha de estreno disponible): no gastar más presupuesto.
+    if (isUpcomingDate(hit.date) && (!it.year || it.year === hit.date.slice(0, 4))) {
+      it.__rel = hit.date;
+      return;
+    }
     it.ids = { ...(it.ids || {}), tmdb: hit.id };
     if (!it.backdrop && hit.backdrop_path) it.backdrop = tmdbImage(hit.backdrop_path, 'w780');
     if (!it.overview && hit.overview) it.overview = cleanText(hit.overview);
@@ -2515,11 +2542,18 @@ async function tmdbCandidates(title, kind) {
     }
   }
   scored.sort((a, b) => b.score - a.score);
+  // Hard caps: one resolve used to walk 35 candidates (Street Fighter) and burned
+  // the whole 60-fetch budget before any of them could finish.
+  const perSrc = {};
   for (const s of scored) {
+    if (out.length >= 10) break;
     if (seen.has(s.ref)) continue;
+    if ((perSrc[s.srcId] || 0) >= 2) continue;
     seen.add(s.ref);
+    perSrc[s.srcId] = (perSrc[s.srcId] || 0) + 1;
     out.push(s);
   }
+  if (out.length < scored.length) log(`[tmdb] candidatos recortados: ${out.length} de ${scored.length} (máx 10, 2 por fuente)`);
   log(`[tmdb] "${title}" (${want}): ${out.length} candidate(s)`);
   return out;
 }
@@ -2548,11 +2582,14 @@ registerSource({
     const { kind, title } = tmdbSplit(path);
     if (!title) return { episodes: [] };
     const cands = await tmdbCandidates(title, 'series');
+    let tried = 0;
     for (const c of cands) {
+      if (FETCH_BUDGET <= 8) { log(`[tmdb] presupuesto de fetch bajo (${FETCH_BUDGET}): se corta tras ${tried} candidato(s)`); break; }
       const src = SOURCES[c.srcId];
       if (!src || !src.episodes) continue;
       const { path: p } = tmdbRefParts(c.ref);
       let eps;
+      tried++;
       try { eps = await src.episodes(p); } catch { continue; }
       if (eps && eps.episodes && eps.episodes.length) {
         log(`[tmdb] episodes for "${title}" from ${c.srcId}: ${eps.episodes.length}`);
@@ -2574,14 +2611,17 @@ registerSource({
     }
     if (!title) return null;
     const cands = await tmdbCandidates(title, kind === 'series' ? 'series' : 'movie');
+    let tried = 0;
     for (const c of cands) {
       // The fast path already tried (and rejected) this exact n79 id: don't
       // spend a second round of fetches on the same dead stream.
       if (c.srcId === 'n79' && (c.ref === 'n79:movie:' + id || c.ref === 'n79:serie:' + id)) continue;
+      if (FETCH_BUDGET <= 8) { log(`[tmdb] presupuesto de fetch bajo (${FETCH_BUDGET}): se corta tras ${tried} candidato(s)`); break; }
       const src = SOURCES[c.srcId];
       if (!src || !src.resolve) continue;
       const { path: p } = tmdbRefParts(c.ref);
       let st;
+      tried++;
       try { st = await src.resolve(p); } catch { continue; }
       if (st && st.url) {
         log(`[tmdb] resolved "${title}" via ${c.srcId}`);
@@ -2742,7 +2782,8 @@ export async function search(params) {
   const all = [];
   for (const g of groups) for (const it of g) if (it) all.push(it);
   await tmdbEnrich(all, query);
-  const results = mergeAndRank([all], query).slice(0, 100);
+  const kept = all.filter((it) => !futureYear(it.year));
+  const results = mergeAndRank([kept], query).slice(0, 100);
   log(`[search] total ranked results: ${results.length}`);
   return results;
 }
@@ -2772,7 +2813,7 @@ export async function home() {
     ];
     const settled = await mapLimit(sourcesList, SEARCH_CONCURRENCY, (s) => safeHome(SOURCES[s.key]));
     sourcesList.forEach((s, idx) => {
-      const items = settled[idx] || [];
+      const items = (settled[idx] || []).filter((x) => !futureYear(x.year));
       log(`[home] ${s.key}: ${items.length} items`);
       if (items.length) rows.push({ id: s.id, title: s.title, items: items.slice(0, 30), genre: s.genre });
     });
@@ -2859,11 +2900,14 @@ export async function section(param) {
   const maxLen = cols.reduce((m, c) => Math.max(m, c.length), 0);
   for (let i = 0; i < maxLen; i++) for (const c of cols) if (c[i]) flat.push(c[i]);
   await enrichDetails(flat, 36);
+  // Ocultos del catálogo: fecha TMDB futura sin estrenar (__rel) o año futuro.
+  for (const r of rows) r.items = r.items.filter((x) => !futureYear(x.year) && !x.__rel);
+  const liveRows = rows.filter((r) => r.items.length);
   // TMDB rows first: they always carry full details and resolve via the n79 id fast path.
-  rows.unshift(...tmdb.rows);
+  liveRows.unshift(...tmdb.rows);
 
-  log(`[section] returned ${rows.length} rows for tab ${selectedTab}`);
-  return { tabs, tab: selectedTab, hero, rows };
+  log(`[section] returned ${liveRows.length} rows for tab ${selectedTab}`);
+  return { tabs, tab: selectedTab, hero, rows: liveRows };
 }
 
 export async function categories() {
@@ -2909,7 +2953,7 @@ export async function browse(params) {
       const sl = await safeHome(SOURCES.sl);
       const cc = await safeHome(SOURCES.cc);
       const hs = await safeHome(SOURCES.hs);
-      const all = [...sl, ...cc, ...hs].filter((x) => x.kind === 'movie');
+      const all = [...sl, ...cc, ...hs].filter((x) => x.kind === 'movie' && !futureYear(x.year));
       log(`[browse] movies topic: ${all.length} items`);
       return { items: all.slice(0, 100), next: null };
     }
@@ -2917,7 +2961,7 @@ export async function browse(params) {
       const cv = await safeHome(SOURCES.cv);
       const sl = await safeHome(SOURCES.sl);
       const pgh = await safeHome(SOURCES.pgh);
-      const all = [...cv, ...sl, ...pgh].filter((x) => x.kind === 'series');
+      const all = [...cv, ...sl, ...pgh].filter((x) => x.kind === 'series' && !futureYear(x.year));
       log(`[browse] series topic: ${all.length} items`);
       return { items: all.slice(0, 100), next: null };
     }
@@ -2925,13 +2969,13 @@ export async function browse(params) {
       const av1 = await safeHome(SOURCES.av1);
       const afv = await safeHome(SOURCES.afv);
       const jk = await safeHome(SOURCES.jkanime);
-      const all = [...av1, ...afv, ...jk];
+      const all = [...av1, ...afv, ...jk].filter((x) => !futureYear(x.year));
       log(`[browse] anime topic: ${all.length} items`);
       return { items: all.slice(0, 100), next: null };
     }
     const sl = await safeHome(SOURCES.sl);
     const cc = await safeHome(SOURCES.cc);
-    return { items: [...sl, ...cc].slice(0, 100), next: null };
+    return { items: [...sl, ...cc].filter((x) => !futureYear(x.year)).slice(0, 100), next: null };
   }
 
   const [srcId, ...rest] = ref.split(':');
@@ -3024,7 +3068,7 @@ export async function resolve(params) {
       throw kino.error('not_found', 'Referencia fusionada inválida');
     }
     log(`[resolve] merged ref across ${refs.length} sources`);
-    const settled = await mapLimit(refs.slice(0, 8), 3, (r) => resolveOneRef(r));
+    const settled = await mapLimit(refs.slice(0, 8), 3, (r) => (FETCH_BUDGET <= 8 ? null : resolveOneRef(r)));
     const streams = [];
     for (let i = 0; i < settled.length; i++) {
       const s = settled[i];
@@ -3042,7 +3086,7 @@ export async function resolve(params) {
     }
     if (!streams.length) {
       log('[resolve ERROR] no source resolved the merged ref');
-      throw kino.error('unavailable', 'No se encontró un servidor de reproducción');
+      throw kino.error('unavailable', 'No se encontró un servidor de reproducción', { userMessage: 'Este título no se ha encontrado en YojaTV' });
     }
     const primary = streams[0];
     const alts = streams.slice(1, 6).map((s) => ({ label: s.label || 'Servidor', url: s.url, ...(s.headers ? { headers: s.headers } : {}) }));
@@ -3058,7 +3102,7 @@ export async function resolve(params) {
   const stream = await resolveOneRef(ref);
   if (!stream) {
     log(`[resolve ERROR] no stream returned for ${ref}`);
-    throw kino.error('unavailable', 'No se encontró un servidor de reproducción');
+    throw kino.error('unavailable', 'No se encontró un servidor de reproducción', { userMessage: 'Este título no se ha encontrado en YojaTV' });
   }
   log(`[resolve OK] stream resolved: ${stream.url}`);
   return labelStream(stream, SOURCES[sid].label || sid);
