@@ -167,9 +167,9 @@ function hsFakeFetch({ vimeosProbeOk, goodstreamHs, withVoe }) {
   return async (url, opts) => respond(url, opts);
 }
 
-test('resolve does not wait for a hanging server (early-exit collector)', async () => {
+test('early-exit collector: the healthy server wins and vimeos never becomes primary', async () => {
   const real = globalThis.kino;
-  globalThis.kino = { ...real, fetch: hsFakeFetch({ vimeosProbeOk: true, goodstreamHs: true, withVoe: false }) };
+  globalThis.kino = { ...real, fetch: hsFakeFetch({ vimeosProbeOk: true, goodstreamHs: true, withVoe: true }) };
   try {
     const t0 = Date.now();
     const out = await Promise.race([
@@ -178,7 +178,8 @@ test('resolve does not wait for a hanging server (early-exit collector)', async 
     ]);
     const elapsed = Date.now() - t0;
     assert.ok(out && out.url, 'resolve must return a stream');
-    assert.ok(out.url.includes('vimeos.net'), 'the healthy server wins');
+    assert.ok(out.url.includes('fakecdn.example'), 'the healthy non-vimeos server wins');
+    assert.ok(!out.url.includes('vimeos'), 'vimeos (player-403) must not win while another stream exists');
     assert.ok(elapsed < 8000, 'must not wait for the hung server, took ' + elapsed + 'ms');
   } finally {
     globalThis.kino = real;
@@ -198,6 +199,20 @@ test('a vimeos stream whose manifest 403s on this device is skipped', async () =
     const all = JSON.stringify(out);
     assert.ok(!all.includes('vimeos.net'), 'nor an alternative');
     assert.ok(out.url.includes('fakecdn.example') || out.url.includes('goodstream'), 'another server wins instead');
+  } finally {
+    globalThis.kino = real;
+  }
+});
+
+test('vimeos is still offered as the last resort when it is the only candidate', async () => {
+  const real = globalThis.kino;
+  globalThis.kino = { ...real, fetch: hsFakeFetch({ vimeosProbeOk: true, goodstreamHs: false, withVoe: false }) };
+  try {
+    const out = await Promise.race([
+      plugin.resolve({ ref: 'hs:peliculas:peli-falsa' }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('resolve demasiado lento')), 12000))
+    ]);
+    assert.ok(out && out.url.includes('vimeos'), 'with no other stream, vimeos remains the last resort');
   } finally {
     globalThis.kino = real;
   }
@@ -231,13 +246,39 @@ test('n79: a healthy stream is kept and carries the net79 referer', async () => 
     if (url.startsWith('https://net79.cc/api/embed-tmdb/1561726')) {
       return { ok: true, status: 200, url, text: () => JSON.stringify({ mp4: 'https://cdn.n79play.example/resource/x.mp4' }) };
     }
-    if (url.includes('cdn.n79play.example')) return { ok: true, status: 206, url, text: () => '' };
+    if (url.includes('cdn.n79play.example')) {
+      return { ok: true, status: 206, url, headers: { 'content-range': 'bytes 0-0/524288000' }, text: () => '' };
+    }
     return { ok: false, status: 404, url, text: () => '' };
   } };
   try {
     const out = await plugin.resolve({ ref: 'n79:movie:1561726' });
     assert.ok(out && out.url.includes('cdn.n79play.example'), 'the healthy n79 stream is returned');
     assert.equal(out.headers && out.headers.Referer, 'https://net79.cc/', 'streams carry the net79 referer');
+  } finally {
+    globalThis.kino = real;
+  }
+});
+
+// Fake-intro bait: sites serve a real 2-8MB file (studio logo/teaser) titled as
+// the movie so playback "works" for seconds. Measured: 2.5MB and 7.2MB baits.
+test('a mp4 smaller than 15MB is rejected as bait (fake intro)', async () => {
+  const real = globalThis.kino;
+  globalThis.kino = { ...real, fetch: async (url) => {
+    if (url.startsWith('https://net79.cc/api/embed-tmdb/1561726')) {
+      return { ok: true, status: 200, url, text: () => JSON.stringify({ mp4: 'https://cdn.n79play.example/resource/logo.mp4' }) };
+    }
+    if (url.includes('cdn.n79play.example')) {
+      return { ok: true, status: 206, url, headers: { 'content-range': 'bytes 0-0/2663878' }, text: () => '' };
+    }
+    return { ok: false, status: 404, url, text: () => '' };
+  } };
+  try {
+    await assert.rejects(
+      () => plugin.resolve({ ref: 'n79:movie:1561726' }),
+      (e) => e && e.code === 'unavailable',
+      'a 2.5MB fake intro must never reach the player'
+    );
   } finally {
     globalThis.kino = real;
   }

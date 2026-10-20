@@ -137,7 +137,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '5.3.1';
+const PLUGIN_VERSION = '5.3.2';
 
 function log(...args) {
   try {
@@ -392,28 +392,70 @@ async function resolveEmbed69(pageText, referer) {
 
 /* ---------- resolve stream collection ---------- */
 // Lower is better. Host penalties first: a vimeos/goodstream URL is only offered
-// when nothing healthier settled in time.
+// when nothing healthier settled in time. vimeos = 99: its manifest 403s in the
+// player while our own probe passes, so it must NEVER win as primary — it is
+// offered only when it is the single candidate (last resort).
 function streamScore(u) {
   if (u.includes('goodstream.one') || u.includes('goodstream.uno')) return 20;
-  if (u.includes('vimeos.net') || u.includes('vimeos.zip')) return 15;
+  if (u.includes('vimeos.net') || u.includes('vimeos.zip')) return 99;
   if (/\.mp4(\?|$)/i.test(u)) return 1;
   if (/\.m3u8(\?|$)/i.test(u)) return 3;
   return 5;
+}
+
+// Collectors stop waiting at a healthy/low-score stream, but NEVER at vimeos:
+// it stays in the race as a candidate and only surfaces if nothing else settles
+// (their own timeoutMs bounds how long that wait can take).
+function earlyExit(st) {
+  const sc = streamScore(st.url);
+  if (sc >= 99) return false;
+  return st.probe === true || sc <= 5;
+}
+
+// Bait floor: the fake "intros" posing as movies measured 2.5 and 7.2 MB; any
+// real movie/episode is orders of magnitude larger. Size comes free from the
+// Range probe's Content-Range; unknown size keeps the stream (no false blocks).
+const MIN_MP4_BYTES = 15 * 1024 * 1024;
+
+function headerValue(headers, name) {
+  if (!headers) return null;
+  if (headers[name] != null) return headers[name];
+  const low = name.toLowerCase();
+  if (headers[low] != null) return headers[low];
+  for (const k in headers) if (k.toLowerCase() === low) return headers[k];
+  return null;
 }
 
 // Health check that EMULATES THE PLAYER's request: same method (GET), same
 // headers, Range bytes=0-1 for progressive mp4, and cookies:false — the player
 // has no cookie jar. A HEAD with plugin cookies can pass while the player still
 // gets 403 (vimeos on device): only streams that answer this request are offered.
-// The verdict is logged so device logs show WHY a server was dropped.
+// For mp4 it also reads the total size from the Range response and drops bait
+// files (fake intros smaller than MIN_MP4_BYTES). Verdicts are logged so device
+// logs show WHY a server was dropped.
 async function probeStream(url, headers) {
   const h = { ...HEADERS, ...(headers || {}) };
-  if (/\.mp4(\?|$)/i.test(url)) h.Range = 'bytes=0-1';
+  const isMp4 = /\.mp4(\?|$)/i.test(url);
+  if (isMp4) h.Range = 'bytes=0-1';
   try {
     const res = await kino.fetch(url, { method: 'GET', headers: h, cookies: false, timeoutMs: 8000 });
     const ok = !!res && (res.ok || res.status === 206);
-    log(`[probe] ${ok ? 'ok' : 'descartado'} (${res && res.status ? res.status : 'err'}) <- ${url}`);
-    return ok;
+    if (!ok) {
+      log(`[probe] descartado (${res && res.status ? res.status : 'err'}) <- ${url}`);
+      return false;
+    }
+    let sizeNote = '';
+    if (isMp4) {
+      const cr = String(headerValue(res.headers, 'Content-Range') || '');
+      const total = cr.includes('/') ? parseInt(cr.split('/')[1], 10) : parseInt(headerValue(res.headers, 'Content-Length') || '0', 10);
+      if (total > 0 && total < MIN_MP4_BYTES) {
+        log(`[probe] descartado (cebo ${(total / 1048576).toFixed(1)}MB < 15MB) <- ${url}`);
+        return false;
+      }
+      if (total >= MIN_MP4_BYTES) sizeNote = ` ${(total / 1048576).toFixed(0)}MB`;
+    }
+    log(`[probe] ok (${res.status}${sizeNote}) <- ${url}`);
+    return true;
   } catch (e) {
     log(`[probe] descartado (${e && e.message ? e.message : 'err'}) <- ${url}`);
     return false;
@@ -435,11 +477,11 @@ async function collectStreams(probes) {
     const st = done.v;
     if (!st || !st.url) continue;
     if (results.some((x) => x.url === st.url)) {
-      if (st.probe === true || streamScore(st.url) <= 5) break;
+      if (earlyExit(st)) break;
       continue;
     }
     results.push(st);
-    if (st.probe === true || streamScore(st.url) <= 5) break;
+    if (earlyExit(st)) break;
   }
   return results
     .sort((a, b) => streamScore(a.url) - streamScore(b.url))
@@ -464,7 +506,13 @@ async function resolveEmbedUrl(embedUrl, referer) {
   }
 
   if (/\.(m3u8|mp4)($|\?)/i.test(u) && !u.includes('/e/') && !u.includes('/embed') && !u.includes('streamtape.com')) {
-    return { url: u, headers: { 'User-Agent': UA, ...(referer ? { Referer: referer } : {}) } };
+    const headers = { 'User-Agent': UA, ...(referer ? { Referer: referer } : {}) };
+    if (/\.mp4($|\?)/i.test(u)) {
+      // Direct mp4: reachability + bait-size gate (fake intros live here).
+      if (!(await probeStream(u, headers))) return null;
+      return { url: u, headers, probe: true };
+    }
+    return { url: u, headers };
   }
 
   if (u.includes('embed69.org') || u.includes('pelisserieshoy.com')) {
@@ -1496,7 +1544,12 @@ registerSource({
     const r = await fetchText(ver, { Referer: base });
     if (r.ok) {
       const srcM = /player\.src\(\{\s*src:\s*['"]([^'"]+)['"]/i.exec(r.text) || /src:\s*['"](https?:\/\/[^'"]+)['"]/i.exec(r.text);
-      if (srcM && /\.(m3u8|mp4)($|\?)/i.test(srcM[1])) return { url: srcM[1] };
+      if (srcM && /\.m3u8($|\?)/i.test(srcM[1])) return { url: srcM[1] };
+      if (srcM && /\.mp4($|\?)/i.test(srcM[1])) {
+        // cuevana serves direct mp4s — including 2.5MB fake-intro bait. Probe
+        // with size gate; on failure keep scanning the page for other players.
+        if (await probeStream(srcM[1], { Referer: base })) return { url: srcM[1], probe: true };
+      }
       const m3u = r.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
       if (m3u) return { url: m3u[1] };
       const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(r.text);
