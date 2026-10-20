@@ -134,7 +134,8 @@ test('kino.tmdb (Kino 0.9.53+): catalog and details with no person key', async (
 // Fake kino.fetch answering a Hackstore page whose servers are vimeos + goodstream
 // (+ optionally voe). goodstreamHs: when true the goodstream embed NEVER answers,
 // reproducing the "server hangs and the whole resolve waited 15 s" stall.
-function hsFakeFetch({ vimeosHeadOk, goodstreamHs, withVoe }) {
+// vimeosProbeOk: the stream probe (GET, like the player) verdict for the vimeos m3u8.
+function hsFakeFetch({ vimeosProbeOk, goodstreamHs, withVoe }) {
   const respond = (url, opts) => {
     if (url.startsWith('https://www.hackstore.fo/peliculas/peli-falsa/')) {
       return {
@@ -149,8 +150,8 @@ function hsFakeFetch({ vimeosHeadOk, goodstreamHs, withVoe }) {
     if (url.includes('vimeos.net/embed-xyz.html')) {
       return { ok: true, status: 200, url, text: () => '<script>sources:["https://s1.vimeos.net/hls2/01/00001/xyz_,n,.urlset/master.m3u8?t=abc&s=1&e=2"]</script>' };
     }
-    if (opts && opts.method === 'HEAD' && url.includes('vimeos.net/hls2')) {
-      return { ok: !!vimeosHeadOk, status: vimeosHeadOk ? 200 : 403, url, text: () => '' };
+    if (url.includes('vimeos.net/hls2')) {
+      return { ok: !!vimeosProbeOk, status: vimeosProbeOk ? 200 : 403, url, text: () => '' };
     }
     if (url.includes('goodstream.one/embed-xyz.html') && goodstreamHs) {
       return new Promise(() => {}); // never answers: the old stall
@@ -168,7 +169,7 @@ function hsFakeFetch({ vimeosHeadOk, goodstreamHs, withVoe }) {
 
 test('resolve does not wait for a hanging server (early-exit collector)', async () => {
   const real = globalThis.kino;
-  globalThis.kino = { ...real, fetch: hsFakeFetch({ vimeosHeadOk: true, goodstreamHs: true, withVoe: false }) };
+  globalThis.kino = { ...real, fetch: hsFakeFetch({ vimeosProbeOk: true, goodstreamHs: true, withVoe: false }) };
   try {
     const t0 = Date.now();
     const out = await Promise.race([
@@ -186,7 +187,7 @@ test('resolve does not wait for a hanging server (early-exit collector)', async 
 
 test('a vimeos stream whose manifest 403s on this device is skipped', async () => {
   const real = globalThis.kino;
-  globalThis.kino = { ...real, fetch: hsFakeFetch({ vimeosHeadOk: false, goodstreamHs: false, withVoe: true }) };
+  globalThis.kino = { ...real, fetch: hsFakeFetch({ vimeosProbeOk: false, goodstreamHs: false, withVoe: true }) };
   try {
     const out = await Promise.race([
       plugin.resolve({ ref: 'hs:peliculas:peli-falsa' }),
@@ -197,6 +198,46 @@ test('a vimeos stream whose manifest 403s on this device is skipped', async () =
     const all = JSON.stringify(out);
     assert.ok(!all.includes('vimeos.net'), 'nor an alternative');
     assert.ok(out.url.includes('fakecdn.example') || out.url.includes('goodstream'), 'another server wins instead');
+  } finally {
+    globalThis.kino = real;
+  }
+});
+
+// The net79 CDN (hakunaymatata) rate-limits media with 429: without a probe the
+// dead URL was returned as the ONLY stream and the whole title failed to play.
+test('n79: a 429-ing CDN is not offered (probe rejects the stream)', async () => {
+  const real = globalThis.kino;
+  globalThis.kino = { ...real, fetch: async (url) => {
+    if (url.startsWith('https://net79.cc/api/embed-tmdb/1561726')) {
+      return { ok: true, status: 200, url, text: () => JSON.stringify({ mp4: 'https://bcdnxw.hakunaymatata.com/resource/x.mp4' }) };
+    }
+    if (url.includes('hakunaymatata.com')) return { ok: false, status: 429, url, text: () => '' };
+    return { ok: false, status: 404, url, text: () => '' };
+  } };
+  try {
+    await assert.rejects(
+      () => plugin.resolve({ ref: 'n79:movie:1561726' }),
+      (e) => e && e.code === 'unavailable',
+      'a dead CDN must surface as unavailable, never as a broken stream'
+    );
+  } finally {
+    globalThis.kino = real;
+  }
+});
+
+test('n79: a healthy stream is kept and carries the net79 referer', async () => {
+  const real = globalThis.kino;
+  globalThis.kino = { ...real, fetch: async (url) => {
+    if (url.startsWith('https://net79.cc/api/embed-tmdb/1561726')) {
+      return { ok: true, status: 200, url, text: () => JSON.stringify({ mp4: 'https://cdn.n79play.example/resource/x.mp4' }) };
+    }
+    if (url.includes('cdn.n79play.example')) return { ok: true, status: 206, url, text: () => '' };
+    return { ok: false, status: 404, url, text: () => '' };
+  } };
+  try {
+    const out = await plugin.resolve({ ref: 'n79:movie:1561726' });
+    assert.ok(out && out.url.includes('cdn.n79play.example'), 'the healthy n79 stream is returned');
+    assert.equal(out.headers && out.headers.Referer, 'https://net79.cc/', 'streams carry the net79 referer');
   } finally {
     globalThis.kino = real;
   }

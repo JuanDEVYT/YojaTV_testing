@@ -137,7 +137,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '5.3.0';
+const PLUGIN_VERSION = '5.3.1';
 
 function log(...args) {
   try {
@@ -401,17 +401,21 @@ function streamScore(u) {
   return 5;
 }
 
-// Reachability check run ON THE DEVICE, on the same network the player will use:
-// a CDN that answers the player's manifest request with 403 answers this HEAD
-// with 403 too, while a plain fetch from another network may still pass.
-async function probeUrl(url, headers) {
+// Health check that EMULATES THE PLAYER's request: same method (GET), same
+// headers, Range bytes=0-1 for progressive mp4, and cookies:false — the player
+// has no cookie jar. A HEAD with plugin cookies can pass while the player still
+// gets 403 (vimeos on device): only streams that answer this request are offered.
+// The verdict is logged so device logs show WHY a server was dropped.
+async function probeStream(url, headers) {
+  const h = { ...HEADERS, ...(headers || {}) };
+  if (/\.mp4(\?|$)/i.test(url)) h.Range = 'bytes=0-1';
   try {
-    const res = await kino.fetch(url, { method: 'HEAD', headers: { ...HEADERS, ...(headers || {}) }, timeoutMs: 8000 });
-    if (res && res.ok) return true;
-    // Some hosts reject HEAD itself (405/501): no verdict, treat as reachable.
-    if (res && (res.status === 405 || res.status === 501)) return true;
-    return false;
-  } catch {
+    const res = await kino.fetch(url, { method: 'GET', headers: h, cookies: false, timeoutMs: 8000 });
+    const ok = !!res && (res.ok || res.status === 206);
+    log(`[probe] ${ok ? 'ok' : 'descartado'} (${res && res.status ? res.status : 'err'}) <- ${url}`);
+    return ok;
+  } catch (e) {
+    log(`[probe] descartado (${e && e.message ? e.message : 'err'}) <- ${url}`);
     return false;
   }
 }
@@ -478,18 +482,18 @@ async function resolveEmbedUrl(embedUrl, referer) {
       const unpacked = extractPackedJs(v.text);
       const m3u = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
       if (m3u) {
-        // On some networks the player gets 403 on this CDN while a plain fetch
-        // passes: only offer a vimeos stream that answers a HEAD from this device.
+        // Probe with the player's exact request (GET, no cookie jar): a CDN
+        // that 403s the player is not worth offering.
         const headers = { 'User-Agent': UA, Referer: u };
-        if (await probeUrl(m3u[1], headers)) return { url: m3u[1], headers, probe: true };
-        log(`[vimeos] manifiesto no responde desde este dispositivo <- ${u}`);
+        if (await probeStream(m3u[1], headers)) return { url: m3u[1], headers, probe: true };
+        log(`[vimeos] manifiesto no reproduce desde este dispositivo <- ${u}`);
         return null;
       }
       const mp4 = (unpacked || v.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
       if (mp4 && !mp4[1].includes('bigbuckbunny') && !mp4[1].includes('test-videos')) {
         const headers = { 'User-Agent': UA, Referer: u };
-        if (await probeUrl(mp4[1], headers)) return { url: mp4[1], headers, probe: true };
-        log(`[vimeos] mp4 no responde desde este dispositivo <- ${u}`);
+        if (await probeStream(mp4[1], headers)) return { url: mp4[1], headers, probe: true };
+        log(`[vimeos] mp4 no reproduce desde este dispositivo <- ${u}`);
         return null;
       }
     }
@@ -503,15 +507,15 @@ async function resolveEmbedUrl(embedUrl, referer) {
       const m3u = (unpacked || g.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
       if (m3u) {
         const headers = { 'User-Agent': UA, Referer: 'https://goodstream.one/' };
-        if (await probeUrl(m3u[1], headers)) return { url: m3u[1], headers, probe: true };
-        log(`[goodstream] manifiesto no responde <- ${u}`);
+        if (await probeStream(m3u[1], headers)) return { url: m3u[1], headers, probe: true };
+        log(`[goodstream] manifiesto no reproduce <- ${u}`);
         return null;
       }
       const mp4 = (unpacked || g.text).match(/(https?:\/\/[^"'\s\\]+\.mp4[^"'\s\\]*)/i);
       if (mp4 && !mp4[1].includes('bigbuckbunny') && !mp4[1].includes('test-videos')) {
         const headers = { 'User-Agent': UA, Referer: 'https://goodstream.one/' };
-        if (await probeUrl(mp4[1], headers)) return { url: mp4[1], headers, probe: true };
-        log(`[goodstream] mp4 no responde <- ${u}`);
+        if (await probeStream(mp4[1], headers)) return { url: mp4[1], headers, probe: true };
+        log(`[goodstream] mp4 no reproduce <- ${u}`);
         return null;
       }
     }
@@ -527,7 +531,9 @@ async function resolveEmbedUrl(embedUrl, referer) {
     return null;
   }
 
-  if (u.includes('voe.sx') || u.includes('megankiddifference.com') || u.includes('chaliceguzzlerlandlord.com')) {
+  // VOE rotates its alias domains over time; keep the known set in one place.
+  const VOE_HOSTS = ['voe.sx', 'megankiddifference.com', 'chaliceguzzlerlandlord.com', 'derricknationtop.com', 'opuxa.lat'];
+  if (VOE_HOSTS.some((h) => u.includes(h))) {
     const vo = await fetchText(u, { Referer: referer });
     if (vo.ok) {
       // 1. Check for VOE's encrypted JSON payload + loader script
@@ -559,7 +565,7 @@ async function resolveEmbedUrl(embedUrl, referer) {
       if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, Referer: u } };
       // 3. JS-redirect follow
       const redir = /(?:window\.location\.href|location\.href)\s*=\s*['"]([^'"]+)['"]/i.exec(vo.text);
-      if (redir && !redir[1].includes('voe.sx') && !redir[1].includes(u)) return resolveEmbedUrl(redir[1], u);
+      if (redir && !VOE_HOSTS.some((h) => redir[1].includes(h)) && !redir[1].includes(u)) return resolveEmbedUrl(redir[1], u);
     }
     return null;
   }
@@ -1875,19 +1881,19 @@ registerSource({
   async search(q) {
     const j = await fetchJson('https://net79.cc/api/catalog/search?q=' + encodeURIComponent(q));
     if (!j || !Array.isArray(j.items)) return [];
-    return j.items.slice(0, 40).map((x) => {
+    return j.items.filter((x) => +x.tmdbId > 0).slice(0, 40).map((x) => {
       const type = x.type === 'tv' ? 'series' : 'movie';
       const id = sanitizeId(String(x.tmdbId), 'n79');
-      return { id, ref: 'n79:' + type + ':' + x.tmdbId, title: cleanText(x.title) || slugToTitle(String(x.tmdbId)), kind: type, poster: x.poster || null, year: x.year ? String(x.year) : null, overview: cleanText(x.overview || ''), rating: x.rating ? Math.round(x.rating * 10) / 10 : null, ...( +x.tmdbId > 0 ? { ids: { tmdb: +x.tmdbId } } : {}) };
+      return { id, ref: 'n79:' + type + ':' + x.tmdbId, title: cleanText(x.title) || slugToTitle(String(x.tmdbId)), kind: type, poster: x.poster || null, year: x.year ? String(x.year) : null, overview: cleanText(x.overview || ''), rating: x.rating ? Math.round(x.rating * 10) / 10 : null, ids: { tmdb: +x.tmdbId } };
     }).filter((x) => x.ref);
   },
   async home() {
     const j = await fetchJson('https://net79.cc/api/catalog/search?q=a');
     if (!j || !Array.isArray(j.items)) return [];
-    return j.items.slice(0, 30).map((x) => {
+    return j.items.filter((x) => +x.tmdbId > 0).slice(0, 30).map((x) => {
       const type = x.type === 'tv' ? 'series' : 'movie';
       const id = sanitizeId(String(x.tmdbId), 'n79');
-      return { id, ref: 'n79:' + type + ':' + x.tmdbId, title: cleanText(x.title) || slugToTitle(String(x.tmdbId)), kind: type, poster: x.poster || null, year: x.year ? String(x.year) : null, badges: ['FULL HD'], ...( +x.tmdbId > 0 ? { ids: { tmdb: +x.tmdbId } } : {}) };
+      return { id, ref: 'n79:' + type + ':' + x.tmdbId, title: cleanText(x.title) || slugToTitle(String(x.tmdbId)), kind: type, poster: x.poster || null, year: x.year ? String(x.year) : null, badges: ['FULL HD'], ids: { tmdb: +x.tmdbId } };
     }).filter((x) => x.ref);
   },
   async episodes(path) {
@@ -1926,40 +1932,40 @@ registerSource({
       : 'https://net79.cc/api/embed-tmdb/' + tmdbId + '?type=movie';
     const j = await fetchJson(embedUrl);
     if (!j) return null;
-    if (j.url) return { url: j.url };
-    if (j.mp4) {
-      const streams = (Array.isArray(j.streams) ? j.streams : []).filter((s) => s && s.url);
-      const rq = (x) => parseInt(String(x.resolution || x.quality || '0')) || 0;
-      const all = [{ url: j.mp4, resolution: j.resolution }].concat(streams.filter((s) => s.url !== j.mp4));
-      all.sort((a, b) => rq(b) - rq(a));
-      const primary = all[0];
-      const alts = all.slice(1, 6);
-      return {
-        url: primary.url,
-        ...(rq(primary) ? { label: rq(primary) + 'p' } : {}),
-        ...(alts.length ? { alternatives: alts.map((s) => ({ label: rq(s) ? rq(s) + 'p' : '', url: s.url })) } : {})
-      };
-    }
-    // Response may be array of quality sources [{quality, url}]
+    // Gather candidates from every response shape, then health-check each one
+    // like the player will (GET, no jar): the CDN behind these links rate-limits
+    // with 429 and would otherwise poison the whole resolve with a dead URL.
+    const rq = (x) => parseInt(String(x.resolution || x.quality || '0')) || 0;
+    const cands = [];
     if (Array.isArray(j)) {
-      const sorted = j.filter((x) => x && x.url).sort((a, b) => {
-        const qa = parseInt(String(a.quality || '0'));
-        const qb = parseInt(String(b.quality || '0'));
-        return qb - qa; // highest quality first
-      });
-      if (sorted.length > 0) {
-        return {
-          url: sorted[0].url,
-          ...(sorted[0].quality ? { label: sorted[0].quality + 'p' } : {}),
-          ...(sorted.length > 1 ? { alternatives: sorted.slice(1, 8).map((s) => ({ label: (s.quality || '') + 'p', url: s.url })) } : {})
-        };
+      cands.push(...j.filter((x) => x && x.url).sort((a, b) => rq(b) - rq(a)));
+    } else {
+      if (j.url) cands.push({ url: j.url });
+      if (j.mp4) {
+        const streams = (Array.isArray(j.streams) ? j.streams : []).filter((s) => s && s.url && s.url !== j.mp4);
+        cands.push(...[{ url: j.mp4, resolution: j.resolution }].concat(streams).sort((a, b) => rq(b) - rq(a)));
       }
+      if (j.sources) cands.push(...j.sources.filter((s) => s && s.url));
     }
-    if (j.sources) {
-      const s = j.sources.find((x) => x.url) || j.sources[0];
-      if (s && s.url) return { url: s.url };
+    if (cands.length === 0) return null;
+    const headers = { Referer: 'https://net79.cc/' };
+    const ok = [];
+    const seen = new Set();
+    for (const c of cands.slice(0, 6)) {
+      if (!c.url || seen.has(c.url)) continue;
+      seen.add(c.url);
+      if (await probeStream(c.url, headers)) ok.push(c);
     }
-    return null;
+    if (ok.length === 0) {
+      log(`[n79] ningún stream superó el sondeo para ${type}:${tmdbId}`);
+      return null;
+    }
+    return {
+      url: ok[0].url,
+      headers,
+      ...(rq(ok[0]) ? { label: rq(ok[0]) + 'p' } : {}),
+      ...(ok.length > 1 ? { alternatives: ok.slice(1, 6).map((s) => ({ label: rq(s) ? rq(s) + 'p' : '', url: s.url, headers })) } : {})
+    };
   }
 });
 
@@ -2444,6 +2450,14 @@ async function tmdbCandidates(title, kind) {
       if (!h || !h.ref || h.kind !== want) continue;
       const norm = tmdbNormTitle(h.title);
       const score = norm === target ? 3 : (norm && target && (norm.includes(target) || target.includes(norm)) ? 2 : 1);
+      if (score === 1) {
+        // No title overlap at all: almost always a "related posts" false hit
+        // that would burn the fetch budget resolving the WRONG movie. Keep it
+        // only when at least one whole word still overlaps (not a substring:
+        // "day" inside "doomsday" would wrongly match).
+        const tw = new Set(target.split(' ').filter(Boolean));
+        if (!norm.split(' ').filter((w) => w.length > 2).some((w) => tw.has(w))) continue;
+      }
       scored.push({ srcId: ids[i], ref: h.ref, score });
     }
   }
@@ -2508,6 +2522,9 @@ registerSource({
     if (!title) return null;
     const cands = await tmdbCandidates(title, kind === 'series' ? 'series' : 'movie');
     for (const c of cands) {
+      // The fast path already tried (and rejected) this exact n79 id: don't
+      // spend a second round of fetches on the same dead stream.
+      if (c.srcId === 'n79' && (c.ref === 'n79:movie:' + id || c.ref === 'n79:serie:' + id)) continue;
       const src = SOURCES[c.srcId];
       if (!src || !src.resolve) continue;
       const { path: p } = tmdbRefParts(c.ref);

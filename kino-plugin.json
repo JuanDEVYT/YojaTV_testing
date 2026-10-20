@@ -1,7 +1,7 @@
 {
   "id": "yoja-tv-kino",
   "name": "YojaTV",
-  "version": "5.3.0",
+  "version": "5.3.1",
   "apiVersion": 6,
   "entry": "plugin.js",
   "description": "Plugin de YojaTV para Kino TV. Películas de cine en español latino, series y anime. Creado por JuandreXter, YojanderGaming y einer_bg.",
@@ -207,6 +207,16 @@
     "*.playmogo.com",
     "megankiddifference.com",
     "*.megankiddifference.com",
+    "chaliceguzzlerlandlord.com",
+    "*.chaliceguzzlerlandlord.com",
+    "derricknationtop.com",
+    "*.derricknationtop.com",
+    "opuxa.lat",
+    "*.opuxa.lat",
+    "cuevanatv.vip",
+    "*.cuevanatv.vip",
+    "cuevana3to.com",
+    "*.cuevana3to.com",
     "dramiyos-cdn.com",
     "*.dramiyos-cdn.com",
     "acek-cdn.com",
@@ -221,6 +231,6 @@
   "icon": "icon.png",
   "signature": {
     "authorKey": "c3caf0f9e51197553082904a2655d51e5afcca579a3048cdfbd8a97f7b2cf2c3",
-    "value": "91d73db7d5d3c69f3ce10d333ffdfa9a29b0abd3d0d59b211ccc1acaad48cb811c6f43ddc225eb55b1543f6df31284f2576eecf0b326debde64405c7b0500d0d"
+    "value": "aa2eb47bba5311874237b90503edf3379e8926b8e4eff7fb9a4fffe1b82b349ced596be0f47ff78974c4ec3ff0f42cb1779713fd564eaf90ab356ca39e852d0c"
   }
 }
