@@ -110,12 +110,17 @@ function labelStream(stream, name) {
     return qualityFromUrl(url);
   };
   const out = { ...stream };
-  out.label = srvLabel(qFrom(out.url, out.label), name) || name;
+  // Calidad conocida → "1080p: <fuente>"; sin calidad, conserva un nombre propio de servidor
+  // (la etiqueta lazy "VOE · Servidor 2" o un nombre fijo de la fuente) y solo entonces la fuente.
+  const combine = (url, lbl) => {
+    const q = qFrom(url, lbl);
+    if (q) return q + ': ' + name;
+    if (typeof lbl === 'string' && lbl && !/^Servidor \d+$/.test(lbl)) return lbl;
+    return name;
+  };
+  out.label = combine(out.url, out.label);
   if (Array.isArray(out.alternatives)) {
-    out.alternatives = out.alternatives.map((a) => ({
-      ...a,
-      label: srvLabel(qFrom(a.url, a.label), name) || name
-    }));
+    out.alternatives = out.alternatives.map((a) => ({ ...a, label: combine(a.url, a.label) }));
   }
   return out;
 }
@@ -137,7 +142,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '5.3.4';
+const PLUGIN_VERSION = '6.0.0';
 
 function log(...args) {
   try {
@@ -507,6 +512,112 @@ async function collectStreams(probes) {
     });
 }
 
+/* ---------- copias perezosas (lazy, apiVersion 6+) ---------- */
+
+const EMBED_LABELS = {
+  'voe.sx': 'VOE', 'filemoon.sx': 'FileMoon', 'streamwish.to': 'StreamWish', 'doodstream.com': 'Dood',
+  'mp4upload.com': 'Mp4Upload', 'goodstream.one': 'GoodStream', 'goodstream.uno': 'GoodStream',
+  'vimeos.net': 'Vimeos', 'vimeos.zip': 'Vimeos', 'embed69.org': 'Embed69', 'pelisserieshoy.com': 'SeriesHoy',
+  'vidhidepro.com': 'VidHide', 'vidhidefast.com': 'VidHide', 'vidhidevip.com': 'VidHideVIP',
+  'unlimplay.com': 'UnlimPlay', 'mixdrop.top': 'MixDrop', 'streamtape.com': 'StreamTape',
+  'uqload.vc': 'Uqload', 'player.videasy.net': 'VideoSy', 'videasy.net': 'VideoSy',
+  'waaw.to': 'WaaW', 'vidfast.vc': 'VidFast', 'playmogo.com': 'PlayMogo', 'nontongo.cc': 'Nontongo',
+  'nontongo.stream': 'Nontongo', 'vidapi.xyz': 'VidAPI', 'vidplayz.site': 'VidPlayz',
+  'kaembed.net': 'KAEmbed', 'mfw09.org': 'MFW', 'hakunaymatata.com': 'Hakuna',
+  'morencius.com': 'Morenci', 'fotise.com': 'Fotise', 'hglink.to': 'HGLink', 'sfastwish.com': 'SFastWish',
+  'dsvplay.com': 'DSVPlay', 'bysekoze.com': 'Bysekoze', 'flixcloud.cc': 'FlixCloud',
+  'callistanise.com': 'Callista', 'derricknationtop.com': 'Server', 'opuxa.lat': 'Opuxa',
+  'chaliceguzzlerlandlord.com': 'Server', 'megankiddifference.com': 'Server', 'megankiddifference': 'Server',
+  'videoapp.zip': 'VideoApp', 'goodstream': 'GoodStream', 'directyp.org': 'DirectYP',
+  'cinehdplus.org': 'CineHD', 'acek-cdn.com': 'Acek', 'player.zilla-networks.com': 'Zilla'
+};
+
+/** Nombre corto del servidor para una copia aún no resuelta (desde el host del embed). */
+function embedLabel(u, i) {
+  let host = '';
+  try { host = new URL(String(u)).hostname.replace(/^www\./, ''); } catch { host = String(u || ''); }
+  const base = host.split('.').slice(-2).join('.');
+  const name = EMBED_LABELS[host] || EMBED_LABELS[base] || host || ('Servidor ' + (i + 2));
+  const lbl = (name + ' · Servidor ' + (i + 2)).slice(0, 48);
+  return lbl;
+}
+
+/** ref de copia perezosa: mismo path + embed codificado (Kino la resuelve con resolve() al elegirla). */
+function lazyRef(path, embedUrl) {
+  const ref = String(path) + '|u=' + encodeURIComponent(String(embedUrl));
+  return ref.length <= 512 ? ref : null;
+}
+
+/** El path es una copia perezosa: devuelve su embed decodificado, o null si no lo es. */
+function lazyEmbedOf(path) {
+  if (typeof path !== 'string') return null;
+  const i = path.indexOf('|u=');
+  if (i < 0) return null;
+  try { return decodeURIComponent(path.slice(i + 3)); } catch { return null; }
+}
+
+/**
+ * Espera el lote `jobs` (cada una devuelve un stream o null) pero NUNCA más de
+ * `graceMs`: un servidor que cuelga no bloquea el resolve — lo que ya respondió
+ * se aprovecha y lo pendiente queda como copia perezosa ('untried') para
+ * reintentarse solo si la persona la elige. `undefined` = no respondió a tiempo.
+ */
+const HANG_GRACE_MS = 2500;
+async function settledWithGrace(jobs, graceMs = HANG_GRACE_MS) {
+  const results = new Array(jobs.length).fill(undefined);
+  const all = Promise.all(jobs.map((j, i) => Promise.resolve(j).then(
+    (v) => { results[i] = v; },
+    () => { results[i] = null; }
+  )));
+  await Promise.race([all, kino.sleep(graceMs)]);
+  return results;
+}
+
+/**
+ * Resuelve la fase eager de una fuente: hasta `max` embeds en paralelo (los primeros de la
+ * lista del sitio, con el mismo orden y score de siempre) y, solo si TODOS fallan, los
+ * siguientes de a uno hasta encontrar el primero sano. Devuelve los streams ya resueltos y
+ * el estado de cada embed ('ok' | 'fail' | 'untried') para armar copias perezosas del resto.
+ */
+async function eagerEmbeds(opts, referer, max = 3) {
+  const list = Array.isArray(opts) ? opts : [];
+  const state = new Map();
+  const ok = [];
+  const head = await settledWithGrace(list.slice(0, max).map((o) => resolveEmbedUrl(o, referer)));
+  head.forEach((st, i) => {
+    const o = list[i];
+    if (st === undefined) return; // no respondió a tiempo: queda 'untried' (perezosa)
+    if (st && st.url) { if (!ok.some((k) => k.st.url === st.url)) ok.push({ st, opt: o }); state.set(o, 'ok'); }
+    else state.set(o, 'fail');
+  });
+  if (!ok.length) {
+    for (const o of list.slice(max)) {
+      let st = null;
+      try { st = await resolveEmbedUrl(o, referer); } catch { st = null; }
+      if (st && st.url) { ok.push({ st, opt: o }); state.set(o, 'ok'); break; }
+      state.set(o, 'fail');
+    }
+  }
+  for (const o of list) if (!state.has(o)) state.set(o, 'untried');
+  ok.sort((a, b) => streamScore(a.st.url) - streamScore(b.st.url));
+  return { ok, state, list };
+}
+
+/** Copias perezosas de los embeds no usados/fallidos: { label, ref } para el menú Servidor. */
+function lazyAltsFrom(list, state, path, skipOpts, labeler) {
+  const alts = [];
+  for (const o of list) {
+    if (alts.length >= 7) break;
+    if (state.get(o) !== 'untried') continue;
+    if (skipOpts && skipOpts.has(o)) continue;
+    const ref = lazyRef(path, o);
+    if (!ref) continue;
+    const lbl = (labeler && labeler(o)) || embedLabel(o, alts.length);
+    alts.push({ label: String(lbl).slice(0, 48), ref });
+  }
+  return alts;
+}
+
 async function resolveEmbedUrl(embedUrl, referer) {
   if (!embedUrl || typeof embedUrl !== 'string') return null;
   let u = embedUrl.trim();
@@ -772,41 +883,62 @@ registerSource({
     return items;
   },
   async resolve(path) {
-    const [type, slug] = path.split(':');
+    const lz = lazyEmbedOf(path);
+    const base = lz ? path.slice(0, path.indexOf('|u=')) : path;
+    const [type, slug] = base.split(':');
     if (type !== 'movie') return null;
     const movieUrl = 'https://ver-peliculas-online.net/pelicula/' + slug + '/';
+    const loadEmbed = async (nume, postId) => {
+      const res = await postForm('https://ver-peliculas-online.net/wp-admin/admin-ajax.php',
+        'action=doo_player_ajax&post=' + postId + '&type=movie&nume=' + nume, { Referer: movieUrl });
+      if (!res) return null;
+      try {
+        const j = typeof res.json === 'function' ? res.json() : JSON.parse(getText(res));
+        if (j && typeof j.embed_url === 'string' && j.embed_url.startsWith('http')) return j.embed_url.trim();
+      } catch {}
+      return null;
+    };
+    if (lz) {
+      const r0 = await fetchText(movieUrl);
+      if (!r0.ok) return null;
+      const postIdM = r0.text.match(/<body[^>]*class="[^"]*postid-(\d+)[^"]*"/i) || r0.text.match(/id="post-(\d+)"/i);
+      if (!postIdM) return null;
+      const embed = await loadEmbed(lz, postIdM[1]);
+      if (!embed) return null;
+      const st = await resolveEmbedUrl(embed, movieUrl);
+      return st && st.url ? { url: st.url, ...(st.headers ? { headers: st.headers } : {}) } : null;
+    }
     const r = await fetchText(movieUrl);
     if (!r.ok) return null;
     const postIdM = r.text.match(/<body[^>]*class="[^"]*postid-(\d+)[^"]*"/i) || r.text.match(/id="post-(\d+)"/i);
     if (!postIdM) return null;
-    const postTasks = [1, 2, 3, 4, 5, 6].map(async (nume) => {
-      const res = await postForm('https://ver-peliculas-online.net/wp-admin/admin-ajax.php',
-        'action=doo_player_ajax&post=' + postIdM[1] + '&type=movie&nume=' + nume, { Referer: movieUrl });
-      if (!res) return null;
-      let embed = null;
-      try {
-        const j = typeof res.json === 'function' ? res.json() : JSON.parse(getText(res));
-        if (j && typeof j.embed_url === 'string' && j.embed_url.startsWith('http')) embed = j.embed_url.trim();
-      } catch {}
+    const nums = [1, 2, 3, 4, 5, 6];
+    const probeNum = async (nume) => {
+      const embed = await loadEmbed(nume, postIdM[1]);
       if (!embed) return null;
       const st = await resolveEmbedUrl(embed, movieUrl);
-      return (st && st.url) ? { label: 'VPO ' + nume, ...st } : null;
-    });
-
-    const streams = await collectStreams(postTasks);
-    if (streams.length === 0) return null;
-
-    const primary = streams[0];
-    const alts = streams.slice(1, 8).map((s) => ({
-      label: s.label,
-      url: s.url,
-      ...(s.headers ? { headers: s.headers } : {})
-    }));
-
+      return (st && st.url) ? { nume, label: 'VPO ' + nume, ...st } : null;
+    };
+    const state = new Map();
+    const head = await settledWithGrace(nums.slice(0, 3).map((n) => probeNum(n)));
+    const ok = [];
+    head.forEach((st, i) => { if (st === undefined) return; if (st && st.url) { ok.push(st); state.set(String(nums[i]), 'ok'); } else state.set(String(nums[i]), 'fail'); });
+    if (!ok.length) {
+      for (const n of nums.slice(3)) {
+        const st = await probeNum(n).catch(() => null);
+        if (st && st.url) { ok.push(st); state.set(String(n), 'ok'); break; }
+        state.set(String(n), 'fail');
+      }
+    }
+    for (const n of nums) if (!state.has(String(n))) state.set(String(n), 'untried');
+    if (ok.length === 0) return null;
+    ok.sort((a, b) => streamScore(a.url) - streamScore(b.url));
+    const eagerAlts = ok.slice(1, 4).map((s) => ({ label: s.label, url: s.url, ...(s.headers ? { headers: s.headers } : {}) }));
+    const lazyAlts = lazyAltsFrom(nums.map(String), state, path, null, (n) => 'VPO ' + n);
     return {
-      url: primary.url,
-      ...(primary.headers ? { headers: primary.headers } : {}),
-      ...(alts.length > 0 ? { alternatives: alts } : {})
+      url: ok[0].url,
+      ...(ok[0].headers ? { headers: ok[0].headers } : {}),
+      ...(eagerAlts.length + lazyAlts.length > 0 ? { alternatives: [...eagerAlts, ...lazyAlts] } : {})
     };
   },
   async episodes(path) {
@@ -893,6 +1025,12 @@ registerSource({
     return { episodes: Array.from({ length: maxEp }, (_, i) => ({ number: i + 1, season: 1, title: 'Episodio ' + (i + 1), ref: 'jkanime:' + slug + '/' + (i + 1) })) };
   },
   async resolve(path) {
+    const lz = lazyEmbedOf(path);
+    const JK_REFERER = 'https://jkanime.net/';
+    if (lz) {
+      const st = await resolveEmbedUrl(lz, JK_REFERER);
+      return st && st.url ? { url: st.url, ...(st.headers ? { headers: st.headers } : {}) } : null;
+    }
     const epPath = path.endsWith('/') ? path : path + '/';
     const r = await fetchText('https://jkanime.net/' + epPath);
     if (!r.ok) return null;
@@ -902,30 +1040,29 @@ registerSource({
     try { list = JSON.parse(serversMatch[1]); } catch { return null; }
     if (!Array.isArray(list) || list.length === 0) return null;
 
-    const serverTasks = list.map(async (s) => {
-      if (!s.remote) return null;
+    const entries = [];
+    for (const s of list) {
+      if (!s || !s.remote) continue;
       let decoded = '';
-      try { decoded = atob(String(s.remote).trim()); } catch { return null; }
-      if (!decoded.startsWith('http')) return null;
+      try { decoded = atob(String(s.remote).trim()); } catch { continue; }
+      if (!decoded.startsWith('http')) continue;
       const serverName = (s.server || 'Servidor').trim();
-      const st = await resolveEmbedUrl(decoded, 'https://jkanime.net/');
-      if (st && st.url) return { label: serverName + (s.size ? ' (' + s.size + ')' : ''), ...st };
-      return null;
-    });
+      entries.push({ url: decoded, label: serverName + (s.size ? ' (' + s.size + ')' : '') });
+    }
+    if (entries.length === 0) return null;
+    const labelOf = (u) => (entries.find((e) => e.url === u) || {}).label || null;
 
-    const streams = await collectStreams(serverTasks);
-    if (streams.length === 0) return null;
-
-    const primary = streams[0];
-    const alts = streams.slice(1, 8).map((st) => ({
-      label: st.label,
-      url: st.url,
-      ...(st.headers ? { headers: st.headers } : {})
+    const { ok, state } = await eagerEmbeds(entries.map((e) => e.url), JK_REFERER);
+    if (ok.length === 0) return null;
+    const eagerAlts = ok.slice(1, 4).map((r2, i) => ({
+      label: labelOf(r2.opt) || embedLabel(r2.opt, i),
+      url: r2.st.url,
+      ...(r2.st.headers ? { headers: r2.st.headers } : {})
     }));
-
+    const alts = [...eagerAlts, ...lazyAltsFrom(entries.map((e) => e.url), state, path, null, labelOf)];
     return {
-      url: primary.url,
-      ...(primary.headers ? { headers: primary.headers } : {}),
+      url: ok[0].st.url,
+      ...(ok[0].st.headers ? { headers: ok[0].st.headers } : {}),
       ...(alts.length > 0 ? { alternatives: alts } : {})
     };
   }
@@ -999,12 +1136,18 @@ registerSource({
     return { episodes };
   },
   async resolve(path) {
-    let url = path;
+    const lz = lazyEmbedOf(path);
+    const base = lz ? path.slice(0, path.indexOf('|u=')) : path;
+    let url = base;
     if (!url.startsWith('http')) {
-      const parts = path.split(':');
+      const parts = base.split(':');
       const type = parts.length > 1 ? parts[0] : 'movie';
       const slug = parts.pop();
       url = 'https://www.cinecalidad.am/' + (type === 'series' ? 'ver-serie/' : 'ver-pelicula/') + slug + '/';
+    }
+    if (lz) {
+      const st = await resolveEmbedUrl(lz, url);
+      return st && st.url ? { url: st.url, ...(st.headers ? { headers: st.headers } : {}) } : null;
     }
     const r = await fetchText(url);
     if (!r.ok) return null;
@@ -1014,16 +1157,15 @@ registerSource({
     while ((om = optRe.exec(r.text)) !== null) opts.push(om[1]);
     if (opts.length === 0) return null;
 
-    const streams = await collectStreams(opts.map((opt) => resolveEmbedUrl(opt, url)));
-
-    if (streams.length === 0) return null;
-
-    const primary = streams[0];
-    const alts = streams.slice(1, 8).map((st, i) => ({
-      label: st.label || 'Servidor ' + (i + 2),
-      url: st.url,
-      ...(st.headers ? { headers: st.headers } : {})
+    const { ok, state } = await eagerEmbeds(opts, url);
+    if (ok.length === 0) return null;
+    const primary = ok[0].st;
+    const eagerAlts = ok.slice(1, 4).map((r2, i) => ({
+      label: embedLabel(r2.opt, i),
+      url: r2.st.url,
+      ...(r2.st.headers ? { headers: r2.st.headers } : {})
     }));
+    const alts = [...eagerAlts, ...lazyAltsFrom(opts, state, path)];
     return {
       url: primary.url,
       ...(primary.headers ? { headers: primary.headers } : {}),
@@ -1077,19 +1219,10 @@ registerSource({
     return items;
   },
   async resolve(path) {
-    const [cat, slug] = path.split(':');
+    const lz = lazyEmbedOf(path);
+    const base = lz ? path.slice(0, path.indexOf('|u=')) : path;
+    const [cat, slug] = base.split(':');
     const detailUrl = 'https://www.hackstore.fo/' + cat + '/' + slug + '/';
-    const r = await fetchText(detailUrl);
-    if (!r.ok) return null;
-
-    const playMatches = [];
-    const playRe = /play\.php\?u=([^&"'\s<>]+)&b=([^&"'\s<>]+)/g;
-    let pm;
-    while ((pm = playRe.exec(r.text)) !== null) {
-      const u = 'https://www.hackstore.fo/play.php?u=' + pm[1] + '&b=' + pm[2];
-      if (!playMatches.includes(u)) playMatches.push(u);
-    }
-    if (playMatches.length === 0) return null;
 
     async function resolvePlay(playUrl) {
       const p = await fetchText(playUrl, { Referer: detailUrl });
@@ -1108,18 +1241,41 @@ registerSource({
       return resolveEmbedUrl(target.startsWith('//') ? 'https:' + target : target, playUrl);
     }
 
-    const streams = await collectStreams(playMatches.map((pu) => resolvePlay(pu)));
-    if (streams.length === 0) return null;
+    if (lz) {
+      const st = await resolvePlay(lz);
+      return st && st.url ? { url: st.url, ...(st.headers ? { headers: st.headers } : {}) } : null;
+    }
+    const r = await fetchText(detailUrl);
+    if (!r.ok) return null;
 
-    const primary = streams[0];
-    const alts = streams.slice(1, 8).map((st, i) => ({
-      label: 'Servidor ' + (i + 2),
-      url: st.url,
-      ...(st.headers ? { headers: st.headers } : {})
-    }));
+    const playMatches = [];
+    const playRe = /play\.php\?u=([^&"'\s<>]+)&b=([^&"'\s<>]+)/g;
+    let pm;
+    while ((pm = playRe.exec(r.text)) !== null) {
+      const u = 'https://www.hackstore.fo/play.php?u=' + pm[1] + '&b=' + pm[2];
+      if (!playMatches.includes(u)) playMatches.push(u);
+    }
+    if (playMatches.length === 0) return null;
+
+    const state = new Map();
+    const head = await settledWithGrace(playMatches.slice(0, 3).map((pu) => resolvePlay(pu).then((st) => ({ pu, st }), () => ({ pu, st: null }))));
+    const ok = [];
+    head.forEach((r) => { if (r === undefined) return; if (r.st && r.st.url) { ok.push({ ...r.st, pu: r.pu }); state.set(r.pu, 'ok'); } else state.set(r.pu, 'fail'); });
+    if (!ok.length) {
+      for (const pu of playMatches.slice(3)) {
+        const st = await resolvePlay(pu).catch(() => null);
+        if (st && st.url) { ok.push({ ...st, pu }); state.set(pu, 'ok'); break; }
+        state.set(pu, 'fail');
+      }
+    }
+    for (const pu of playMatches) if (!state.has(pu)) state.set(pu, 'untried');
+    if (ok.length === 0) return null;
+    ok.sort((a, b) => streamScore(a.url) - streamScore(b.url));
+    const eagerAlts = ok.slice(1, 4).map((s, i) => ({ label: embedLabel(s.pu, i), url: s.url, ...(s.headers ? { headers: s.headers } : {}) }));
+    const alts = [...eagerAlts, ...lazyAltsFrom(playMatches, state, path)];
     return {
-      url: primary.url,
-      ...(primary.headers ? { headers: primary.headers } : {}),
+      url: ok[0].url,
+      ...(ok[0].headers ? { headers: ok[0].headers } : {}),
       ...(alts.length > 0 ? { alternatives: alts } : {})
     };
   }
@@ -1323,19 +1479,12 @@ registerSource({
     return { episodes: list };
   },
   async resolve(path) {
-    const parts = path.split(':');
+    const lz = lazyEmbedOf(path);
+    const base = lz ? path.slice(0, path.indexOf('|u=')) : path;
+    const parts = base.split(':');
     const url = parts.length >= 3
       ? 'https://sololatino.net/serie/' + parts[0] + '/temporada-' + parts[1] + '/episodio-' + parts[2]
       : 'https://sololatino.net/' + parts[0] + '/' + (parts[1] || parts[0]);
-    const r = await fetchText(url);
-    if (!r.ok) return null;
-    const opts = [];
-    const tokRe = /data-player-token="([^"]+)"[^>]*>\s*([^<]*)</g;
-    let tm;
-    while ((tm = tokRe.exec(r.text)) !== null) {
-      opts.push({ token: tm[1], label: cleanText(tm[2]) || 'Servidor ' + (opts.length + 1) });
-    }
-    if (opts.length === 0) return null;
     if (!globalThis._slCsrfTs || (Date.now() - globalThis._slCsrfTs) > 1800000) {
       await fetchText('https://sololatino.net/sanctum/csrf-cookie', { Referer: url });
       globalThis._slCsrfTs = Date.now();
@@ -1350,17 +1499,44 @@ registerSource({
       try { j = JSON.parse(getText(res)); } catch { return null; }
       const embedUrl = j && j.url;
       if (!embedUrl || !String(embedUrl).startsWith('http')) return null;
-      // Use resolveEmbedUrl: tries m3u8/mp4 extraction, follows inner iframes, handles vimeos/voe etc.
       const st = await resolveEmbedUrl(embedUrl, url);
-      if (st && st.url) return { label: o.label, ...st };
+      if (st && st.url) return o.label ? { label: o.label, ...st } : st;
       return null;
     }
 
-    const streams = await collectStreams(opts.map((o) => resolveOpt(o)));
-    if (streams.length === 0) return null;
+    if (lz) {
+      const st = await resolveOpt({ token: lz });
+      return st && st.url ? { url: st.url, ...(st.headers ? { headers: st.headers } : {}) } : null;
+    }
+    const r = await fetchText(url);
+    if (!r.ok) return null;
+    const opts = [];
+    const tokRe = /data-player-token="([^"]+)"[^>]*>\s*([^<]*)</g;
+    let tm;
+    while ((tm = tokRe.exec(r.text)) !== null) {
+      opts.push({ token: tm[1], label: cleanText(tm[2]) || 'Servidor ' + (opts.length + 1) });
+    }
+    if (opts.length === 0) return null;
+    const labelOf = (tk) => (opts.find((o) => o.token === tk) || {}).label || null;
+    const state = new Map();
+    const head = await settledWithGrace(opts.slice(0, 3).map((o) => resolveOpt(o)));
+    const ok = [];
+    head.forEach((st, i) => { if (st === undefined) return; if (st && st.url) { ok.push(st); state.set(opts[i].token, 'ok'); } else state.set(opts[i].token, 'fail'); });
+    if (!ok.length) {
+      for (const o of opts.slice(3)) {
+        const st = await resolveOpt(o).catch(() => null);
+        if (st && st.url) { ok.push(st); state.set(o.token, 'ok'); break; }
+        state.set(o.token, 'fail');
+      }
+    }
+    for (const o of opts) if (!state.has(o.token)) state.set(o.token, 'untried');
+    if (ok.length === 0) return null;
+    const eagerAlts = ok.slice(1, 6).map((s) => ({ label: s.label, url: s.url, ...(s.headers ? { headers: s.headers } : {}) }));
+    const lazyAlts = lazyAltsFrom(opts.map((o) => o.token), state, path, null, labelOf);
     return {
-      url: streams[0].url,
-      ...(streams.length > 1 ? { alternatives: streams.slice(1, 6).map((s) => ({ label: s.label, url: s.url })) } : {})
+      url: ok[0].url,
+      ...(ok[0].headers ? { headers: ok[0].headers } : {}),
+      ...(eagerAlts.length + lazyAlts.length > 0 ? { alternatives: [...eagerAlts, ...lazyAlts] } : {})
     };
   }
 });
@@ -1423,10 +1599,27 @@ registerSource({
     return { episodes: list };
   },
   async resolve(path) {
-    const parts = path.split(':');
+    const lz = lazyEmbedOf(path);
+    const base = lz ? path.slice(0, path.indexOf('|u=')) : path;
+    const parts = base.split(':');
     const type = parts[0], slug = parts[1];
     const cat = type === 'series' ? 'series' : 'pelicula';
     const detailUrl = 'https://pelisgratishds.com/' + cat + '/' + slug + '/';
+    const loadFrame = async () => {
+      const r = await fetchText(detailUrl);
+      if (!r.ok) return null;
+      const embedM = /embed\.php\?id=(\d+)/.exec(r.text);
+      if (!embedM) return null;
+      const frameUrl = 'https://embed.pelisgratishd.lat/embed.php?id=' + embedM[1];
+      const e = await fetchText(frameUrl, { Referer: 'https://pelisgratishds.com/' });
+      return e.ok ? frameUrl : null;
+    };
+    if (lz) {
+      const frameUrl = await loadFrame();
+      if (!frameUrl) return null;
+      const st = await resolveEmbedUrl(lz, frameUrl);
+      return st && st.url ? { url: st.url, ...(st.headers ? { headers: st.headers } : {}) } : null;
+    }
     const r = await fetchText(detailUrl);
     if (!r.ok) return null;
     const embedM = /embed\.php\?id=(\d+)/.exec(r.text);
@@ -1457,25 +1650,34 @@ registerSource({
       if (directM) opts.push({ label: 'Directo', url: directM[1] });
     }
     if (opts.length === 0) return null;
+    const labelOf = (u) => (opts.find((o) => o.url === u) || {}).label || null;
 
-    // Parallelize all server fetches
     async function resolveOpt(o) {
       const st = await resolveEmbedUrl(o.url, frameUrl);
       if (st && st.url) return { label: o.label, ...st };
       return null;
     }
 
-    const resolved = await collectStreams(opts.map((o) => resolveOpt(o)));
-
-    if (resolved.length > 0) {
-      const primary = resolved[0];
-      return {
-        url: primary.url,
-        ...(primary.headers ? { headers: primary.headers } : {}),
-        ...(resolved.length > 1 ? { alternatives: resolved.slice(1, 7).map((s) => ({ label: s.label, url: s.url, ...(s.headers ? { headers: s.headers } : {}) })) } : {})
-      };
+    const state = new Map();
+    const head = await settledWithGrace(opts.slice(0, 3).map((o) => resolveOpt(o)));
+    const ok = [];
+    head.forEach((st, i) => { if (st === undefined) return; if (st && st.url) { ok.push(st); state.set(opts[i].url, 'ok'); } else state.set(opts[i].url, 'fail'); });
+    if (!ok.length) {
+      for (const o of opts.slice(3)) {
+        const st = await resolveOpt(o).catch(() => null);
+        if (st && st.url) { ok.push(st); state.set(o.url, 'ok'); break; }
+        state.set(o.url, 'fail');
+      }
     }
-    return null;
+    for (const o of opts) if (!state.has(o.url)) state.set(o.url, 'untried');
+    if (ok.length === 0) return null;
+    const eagerAlts = ok.slice(1, 7).map((s) => ({ label: s.label, url: s.url, ...(s.headers ? { headers: s.headers } : {}) }));
+    const lazyAlts = lazyAltsFrom(opts.map((o) => o.url), state, path, null, labelOf);
+    return {
+      url: ok[0].url,
+      ...(ok[0].headers ? { headers: ok[0].headers } : {}),
+      ...(eagerAlts.length + lazyAlts.length > 0 ? { alternatives: [...eagerAlts, ...lazyAlts] } : {})
+    };
   }
 
 });
@@ -1905,12 +2107,18 @@ registerSource({
   },
   async resolve(path) {
     // ref is <slug>:<n>:<url> and the url itself holds ':', so rejoin from index 2
-    const cut = path.indexOf(':');
-    const slug = cut === -1 ? path : path.slice(0, cut);
-    const rest = cut === -1 ? '' : path.slice(cut + 1);
+    const lz = lazyEmbedOf(path);
+    const raw = lz ? path.slice(0, path.indexOf('|u=')) : path;
+    const cut = raw.indexOf(':');
+    const slug = cut === -1 ? raw : raw.slice(0, cut);
+    const rest = cut === -1 ? '' : raw.slice(cut + 1);
     const cut2 = rest.indexOf(':');
     const epUrl = cut2 === -1 ? '' : rest.slice(cut2 + 1);
     const url = epUrl.startsWith('http') ? epUrl : 'https://animeflv.or.at/anime/' + slug + '/episode-' + rest.slice(0, cut2 === -1 ? rest.length : cut2) + '/';
+    if (lz) {
+      const st = await resolveEmbedUrl(lz, url);
+      return st && st.url ? { url: st.url, ...(st.headers ? { headers: st.headers } : {}) } : null;
+    }
     const r = await fetchText(url);
     if (!r.ok) return null;
     // servers arrive base64-encoded in data-src / data-default-src
@@ -1928,16 +2136,16 @@ registerSource({
     const ALLOWED_HOSTS = ['zilla-networks.com', 'mp4upload.com', 'voe.sx', 'filemoon.sx', 'goodstream.one', 'streamtape.com'];
     const validServers = servers.filter((s) => ALLOWED_HOSTS.some((h) => s.url.includes(h)) || /\.m3u8(\?|$)/i.test(s.url));
     const toResolve = (validServers.length > 0 ? validServers : servers).slice(0, 6);
+    const labelOf = (u) => (toResolve.find((s) => s.url === u) || {}).label || null;
 
-    async function resolveAfvServer(s) {
-      const st = await resolveEmbedUrl(s.url, url);
-      if (st && st.url) return { label: s.label, ...st };
-      return null;
-    }
-
-    const streams = await collectStreams(toResolve.map((s) => resolveAfvServer(s)));
-    if (streams.length === 0) return null;
-    return { url: streams[0].url, alternatives: streams.slice(1, 8).map((s) => ({ label: s.label, url: s.url })) };
+    const { ok, state } = await eagerEmbeds(toResolve.map((s) => s.url), url);
+    if (ok.length === 0) return null;
+    const eagerAlts = ok.slice(1, 4).map((r2, i) => ({ label: labelOf(r2.opt) || embedLabel(r2.opt, i), url: r2.st.url }));
+    const lazyAlts = lazyAltsFrom(toResolve.map((s) => s.url), state, path, null, labelOf);
+    return {
+      url: ok[0].st.url,
+      alternatives: [...eagerAlts, ...lazyAlts]
+    };
   }
 });
 
@@ -1991,11 +2199,19 @@ registerSource({
     return { episodes: list.length > 0 ? list : [{ season: 1, number: 1, title: 'Episodio 1', ref: 'n79:serie:' + tmdbId + ':1:1' }] };
   },
   async resolve(path) {
-    const parts = path.split(':');
+    const lz = lazyEmbedOf(path);
+    const base = lz ? path.slice(0, path.indexOf('|u=')) : path;
+    const parts = base.split(':');
     const type = parts[0], tmdbId = parts[1];
+    const isSerie = type === 'series' || type === 'serie'; // los refs de episodios usan "serie"
     const season = parts[2] || '1', episode = parts[3] || '1';
+    const headers = { Referer: 'https://net79.cc/' };
+    if (lz) {
+      if (await probeStream(lz, headers)) return { url: lz, headers };
+      return null;
+    }
     // Fixed: path-based endpoint /api/embed-tmdb/<id>?type=...
-    const embedUrl = type === 'series'
+    const embedUrl = isSerie
       ? 'https://net79.cc/api/embed-tmdb/' + tmdbId + '?type=tv&se=' + season + '&ep=' + episode
       : 'https://net79.cc/api/embed-tmdb/' + tmdbId + '?type=movie';
     const j = await fetchJson(embedUrl);
@@ -2016,23 +2232,27 @@ registerSource({
       if (j.sources) cands.push(...j.sources.filter((s) => s && s.url));
     }
     if (cands.length === 0) return null;
-    const headers = { Referer: 'https://net79.cc/' };
+    const candUrls = [...new Set(cands.map((c) => c.url).filter((u) => typeof u === 'string' && u.startsWith('http')))].slice(0, 6);
+    if (candUrls.length === 0) return null;
+    const rqOf = (u) => rq(cands.find((c) => c.url === u) || {});
+    const state = new Map();
     const ok = [];
-    const seen = new Set();
-    for (const c of cands.slice(0, 6)) {
-      if (!c.url || seen.has(c.url)) continue;
-      seen.add(c.url);
-      if (await probeStream(c.url, headers)) ok.push(c);
+    for (const u of candUrls) {
+      if (await probeStream(u, headers)) { ok.push(u); state.set(u, 'ok'); if (ok.length >= 2) break; }
+      else state.set(u, 'fail');
     }
+    for (const u of candUrls) if (!state.has(u)) state.set(u, 'untried');
     if (ok.length === 0) {
       log(`[n79] ningún stream superó el sondeo para ${type}:${tmdbId}`);
       return null;
     }
+    const eagerAlts = ok.slice(1, 5).map((u) => ({ label: rqOf(u) ? rqOf(u) + 'p' : embedLabel(u, 0), url: u, headers }));
+    const lazyAlts = lazyAltsFrom(candUrls, state, path, null, (u) => (rqOf(u) ? rqOf(u) + 'p' : null));
     return {
-      url: ok[0].url,
+      url: ok[0],
       headers,
-      ...(rq(ok[0]) ? { label: rq(ok[0]) + 'p' } : {}),
-      ...(ok.length > 1 ? { alternatives: ok.slice(1, 6).map((s) => ({ label: rq(s) ? rq(s) + 'p' : '', url: s.url, headers })) } : {})
+      ...(rqOf(ok[0]) ? { label: rqOf(ok[0]) + 'p' } : {}),
+      ...(eagerAlts.length + lazyAlts.length > 0 ? { alternatives: [...eagerAlts, ...lazyAlts] } : {})
     };
   }
 });
@@ -2052,8 +2272,14 @@ registerSource({
     }).filter((x) => x.ref);
   },
   async resolve(path) {
-    const [type, id] = path.split(':');
+    const lz = lazyEmbedOf(path);
+    const base = lz ? path.slice(0, path.indexOf('|u=')) : path;
+    const [type, id] = base.split(':');
     const pageUrl = 'https://onlyflix.to/' + (type === 'series' ? 'tv' : 'movie') + '/' + id + '/';
+    if (lz) {
+      const st = await resolveEmbedUrl(lz, pageUrl);
+      return st && st.url ? { url: st.url, ...(st.headers ? { headers: st.headers } : {}) } : null;
+    }
     // Try REST meta first (fast path)
     const j = await fetchJson('https://onlyflix.to/wp-json/wp/v2/' + (type === 'series' ? 'tv' : 'movies') + '/' + id);
     if (j && j.meta && j.meta.embed) {
@@ -2075,13 +2301,14 @@ registerSource({
           const players = pj && pj.data ? (Array.isArray(pj.data) ? pj.data : Object.values(pj.data)) : [];
           const urls = players.map((p) => p.url || p.link || p).filter((u) => typeof u === 'string' && u.startsWith('http'));
           if (urls.length > 0) {
-            const resolved = await Promise.all(urls.slice(0, 4).map((u) => resolveEmbedUrl(u, pageUrl)));
-            const valid = resolved.filter((st) => st && st.url);
-            if (valid.length > 0) {
+            const { ok, state } = await eagerEmbeds(urls, pageUrl);
+            if (ok.length > 0) {
+              const eagerAlts = ok.slice(1, 5).map((r2, i) => ({ label: embedLabel(r2.opt, i), url: r2.st.url, ...(r2.st.headers ? { headers: r2.st.headers } : {}) }));
+              const alts = [...eagerAlts, ...lazyAltsFrom(urls, state, path)];
               return {
-                url: valid[0].url,
-                ...(valid[0].headers ? { headers: valid[0].headers } : {}),
-                ...(valid.length > 1 ? { alternatives: valid.slice(1, 6).map((s, i) => ({ label: 'Servidor ' + (i + 2), url: s.url, ...(s.headers ? { headers: s.headers } : {}) })) } : {})
+                url: ok[0].st.url,
+                ...(ok[0].st.headers ? { headers: ok[0].st.headers } : {}),
+                ...(alts.length > 0 ? { alternatives: alts } : {})
               };
             }
           }
@@ -2151,18 +2378,26 @@ registerSource({
     return items;
   },
   async resolve(path) {
-    const url = 'https://pelisplushd.la' + path;
+    const lz = lazyEmbedOf(path);
+    const base = lz ? path.slice(0, path.indexOf('|u=')) : path;
+    const url = 'https://pelisplushd.la' + base;
+    if (lz) {
+      const st = await resolveEmbedUrl(lz, url);
+      return st && st.url ? { url: st.url, ...(st.headers ? { headers: st.headers } : {}) } : null;
+    }
     const r = await fetchText(url);
     if (!r.ok) return null;
     const dataUrls = [...r.text.matchAll(/data-url="([^"]+)"/g)].map((m) => m[1]);
     if (dataUrls.length > 0) {
-      const resolved = await collectStreams(dataUrls.map((du) => resolveEmbedUrl(du, url)));
-      if (resolved.length > 0) {
-        const primary = resolved[0];
+      const { ok, state } = await eagerEmbeds(dataUrls, url);
+      if (ok.length > 0) {
+        const primary = ok[0].st;
+        const eagerAlts = ok.slice(1, 4).map((r2, i) => ({ label: embedLabel(r2.opt, i), url: r2.st.url, ...(r2.st.headers ? { headers: r2.st.headers } : {}) }));
+        const alts = [...eagerAlts, ...lazyAltsFrom(dataUrls, state, path)];
         return {
           url: primary.url,
           ...(primary.headers ? { headers: primary.headers } : {}),
-          ...(resolved.length > 1 ? { alternatives: resolved.slice(1, 7).map((s, i) => ({ label: 'Servidor ' + (i + 2), url: s.url, ...(s.headers ? { headers: s.headers } : {}) })) } : {})
+          ...(alts.length > 0 ? { alternatives: alts } : {})
         };
       }
     }
@@ -2221,7 +2456,13 @@ registerSource({
     return items;
   },
   async resolve(path) {
-    const url = path.startsWith('http') ? path : 'https://1movies.stream' + path;
+    const lz = lazyEmbedOf(path);
+    const base = lz ? path.slice(0, path.indexOf('|u=')) : path;
+    const url = base.startsWith('http') ? base : 'https://1movies.stream' + base;
+    if (lz) {
+      const st = await resolveEmbedUrl(lz, url);
+      return st && st.url ? { url: st.url, ...(st.headers ? { headers: st.headers } : {}) } : null;
+    }
     const r = await fetchText(url);
     if (!r.ok) return null;
     // Extract data-token from the watch block — no static iframe on this site
@@ -2237,13 +2478,14 @@ registerSource({
             const valid = servers.filter((s) => s && (s.link || s.url));
             if (valid.length > 0) {
               const urls = valid.map((s) => s.link || s.url).filter((u) => typeof u === 'string' && u.startsWith('http'));
-              const resolved = await Promise.all(urls.slice(0, 4).map((u) => resolveEmbedUrl(u, url)));
-              const okStreams = resolved.filter((st) => st && st.url);
-              if (okStreams.length > 0) {
+              const { ok, state } = await eagerEmbeds(urls, url);
+              if (ok.length > 0) {
+                const eagerAlts = ok.slice(1, 5).map((r2, i) => ({ label: embedLabel(r2.opt, i), url: r2.st.url, ...(r2.st.headers ? { headers: r2.st.headers } : {}) }));
+                const alts = [...eagerAlts, ...lazyAltsFrom(urls, state, path)];
                 return {
-                  url: okStreams[0].url,
-                  ...(okStreams[0].headers ? { headers: okStreams[0].headers } : {}),
-                  ...(okStreams.length > 1 ? { alternatives: okStreams.slice(1, 6).map((s, i) => ({ label: 'Servidor ' + (i + 2), url: s.url, ...(s.headers ? { headers: s.headers } : {}) })) } : {})
+                  url: ok[0].st.url,
+                  ...(ok[0].st.headers ? { headers: ok[0].st.headers } : {}),
+                  ...(alts.length > 0 ? { alternatives: alts } : {})
                 };
               }
             }
@@ -2370,6 +2612,11 @@ function tmdbRowsOf(j, kind) {
     .map((x) => tmdbItem(x, kind));
 }
 
+/** ref de "Ver más" para una fila TMDB: la spec viaa codificada para volver a buscarla en browse(). */
+function tmdbBrowseRef(s) {
+  return 'browse:tmdb:' + encodeURIComponent(JSON.stringify({ p: s.path, k: s.kind, g: s.params || null }));
+}
+
 async function tmdbHomeRows() {
   if (!tmdbReady()) return [];
   const rows = [];
@@ -2385,7 +2632,7 @@ async function tmdbHomeRows() {
     const j = settled[i] || null;
     const items = tmdbRowsOf(j, s.kind);
     log(`[home] tmdb ${s.id}: ${items.length} items`);
-    if (items.length) rows.push({ id: s.id, title: s.title, items: items.slice(0, 24), genre: s.genre });
+    if (items.length) rows.push({ id: s.id, title: s.title, items: items.slice(0, 24), genre: s.genre, ref: tmdbBrowseRef(s) });
   });
   return rows;
 }
@@ -2414,7 +2661,7 @@ async function tmdbTabRows(tab) {
     const j = settled[i] || null;
     const items = tmdbRowsOf(j, s.kind);
     if (items.length && !heroImage) heroImage = items.find((x) => x.backdrop) ? items.find((x) => x.backdrop).backdrop : null;
-    if (items.length) rows.push({ id: s.id, title: s.title, items: items.slice(0, 24), genre: tab });
+    if (items.length) rows.push({ id: s.id, title: s.title, items: items.slice(0, 24), genre: tab, ref: tmdbBrowseRef(s) });
   });
   log(`[section] tmdb ${tab}: ${rows.length} row(s)`);
   return { rows, heroImage };
@@ -2770,6 +3017,22 @@ export async function search(params) {
   else if (params && typeof params.q === 'string') query = params.q.trim();
   else if (params && typeof params.query === 'string') query = params.query.trim();
   log(`[search] called with query: "${query}"`);
+
+  // scopedSearch: buscar acotado al ref de la página de donde vino (capability "scopedSearch")
+  const within = (params && typeof params === 'object' && typeof params.within === 'string') ? params.within.trim() : '';
+  if (within) {
+    log(`[search] scoped within: "${within}"`);
+    let page = null;
+    try { page = await browse(within, null); } catch { page = null; }
+    if (!page || !Array.isArray(page.items) || !page.items.length) return null; // Kino filtra él
+    const pool = page.items.filter((it) => !futureYear(it.year));
+    if (!query) return pool.slice(0, 100);
+    const words = tmdbNormTitle(query).split(' ').filter(Boolean);
+    const out = pool.filter((it) => { const t = tmdbNormTitle(it.title); return words.every((w) => t.includes(w)); });
+    log(`[search] scoped results: ${out.length}`);
+    return out.slice(0, 100);
+  }
+
   if (!query) return [];
 
   const ids = Object.keys(SOURCES).filter((id) => id !== 'tmdb');
@@ -2815,7 +3078,7 @@ export async function home() {
     sourcesList.forEach((s, idx) => {
       const items = (settled[idx] || []).filter((x) => !futureYear(x.year));
       log(`[home] ${s.key}: ${items.length} items`);
-      if (items.length) rows.push({ id: s.id, title: s.title, items: items.slice(0, 30), genre: s.genre });
+      if (items.length) rows.push({ id: s.id, title: s.title, items: items.slice(0, 30), genre: s.genre, ref: 'browse:src:' + s.key });
     });
   }
 
@@ -2863,7 +3126,7 @@ export async function section(param) {
     const got = await mapLimit(list, SEARCH_CONCURRENCY, (s) => safeHome(SOURCES[s.key]));
     list.forEach((s, i) => {
       const mv = (got[i] || []).filter((x) => x.kind === 'movie');
-      if (mv.length) rows.push({ id: s.id, title: s.title, items: mv.slice(0, 30), genre: 'peliculas' });
+      if (mv.length) rows.push({ id: s.id, title: s.title, items: mv.slice(0, 30), genre: 'peliculas', ref: 'browse:src:' + s.key });
     });
   } else if (selectedTab === 'series') {
     const list = [
@@ -2876,7 +3139,7 @@ export async function section(param) {
     const got = await mapLimit(list, SEARCH_CONCURRENCY, (s) => safeHome(SOURCES[s.key]));
     list.forEach((s, i) => {
       const sv = (got[i] || []).filter((x) => x.kind === 'series');
-      if (sv.length) rows.push({ id: s.id, title: s.title, items: sv.slice(0, 30), genre: 'series' });
+      if (sv.length) rows.push({ id: s.id, title: s.title, items: sv.slice(0, 30), genre: 'series', ref: 'browse:src:' + s.key });
     });
   } else if (selectedTab === 'anime') {
     const list = [
@@ -2887,7 +3150,7 @@ export async function section(param) {
     const got = await mapLimit(list, SEARCH_CONCURRENCY, (s) => safeHome(SOURCES[s.key]));
     list.forEach((s, i) => {
       const an = got[i] || [];
-      if (an.length) rows.push({ id: s.id, title: s.title, items: an.slice(0, 30), genre: 'anime' });
+      if (an.length) rows.push({ id: s.id, title: s.title, items: an.slice(0, 30), genre: 'anime', ref: 'browse:src:' + s.key });
     });
   }
 
@@ -2936,15 +3199,164 @@ export async function settingsStatus() {
   return { estado: lines.join(' · ') };
 }
 
-export async function browse(params) {
+export async function action(key) {
+  await kino.sleep(0);
+  if (key === 'clearCache') {
+    let n = 0;
+    try { for (const k of kino.storage.keys()) if (k.indexOf('tmdb:') === 0) { kino.storage.remove(k); n++; } } catch {}
+    log(`[action] clearCache removed ${n} tmdb entries`);
+    return { message: 'Caché de TMDB limpia (' + n + ' entradas)' };
+  }
+  if (key === 'testTmdb') {
+    const kt = typeof kino.tmdb === 'function';
+    if (!kt && !tmdbKey()) return { message: 'Falta la API key de TMDB' };
+    let j = null;
+    try { j = await tmdbFetch('/configuration'); } catch { j = null; }
+    return { message: j ? ('TMDB responde bien (' + tmdbLang() + ')') : 'TMDB no respondió: revisa la API key' };
+  }
+  return null;
+}
+
+export async function validateSettings(values) {
+  if (!values || typeof values !== 'object') return null;
+  const lang = typeof values.tmdbLang === 'string' ? values.tmdbLang.trim() : '';
+  if (lang && !/^[a-z]{2}(-[A-Za-z]{2,4})?$/.test(lang)) return { tmdbLang: 'Usa un código como es-MX o en-US' };
+  const key = typeof values.tmdbKey === 'string' ? values.tmdbKey.trim() : '';
+  if (key) {
+    let res = null;
+    try {
+      res = await kino.fetch(TMDB_API + '/configuration?api_key=' + encodeURIComponent(key), {
+        headers: { Accept: 'application/json' },
+        timeoutMs: 8000
+      });
+    } catch (e) {
+      if (e && e.code === 'timeout') throw kino.error('unavailable', 'TMDB no responde a tiempo');
+      throw kino.error('unavailable', 'Sin respuesta de TMDB');
+    }
+    if (res && res.status === 401) return { tmdbKey: 'Esa API key no es válida' };
+    if (!res || !res.ok) throw kino.error('unavailable', 'TMDB respondió ' + (res ? res.status : 'nada'));
+  }
+  return null;
+}
+
+/** Tipo que se puede afirmar con seguridad solo leyendo la forma de un ref propio. */
+function kindOfOwnRef(srcId, ref) {
+  const path = ref.slice(srcId.length + 1);
+  const parts = path.split(':');
+  const first = (parts[0] || '').toLowerCase();
+  const flat = path.toLowerCase();
+  const typeTok = first; // <src>:<tipo>:<slug> → el tipo es la 1ª parte del path
+  switch (srcId) {
+    case 'av1': case 'afv': return 'series';
+    case 'pluto': case '1mv': return 'movie';
+    case 'tmdb': return first === 'series' ? 'series' : first === 'movie' ? 'movie' : null;
+    case 'n79': case 'ofx': case 'chp': case 'chx':
+      return first === 'series' || first === 'serie' ? 'series' : first === 'movie' ? 'movie' : null;
+    case 'vpo': case 'cc': case 'pgh':
+      return typeTok === 'series' || typeTok === 'serie' ? 'series' : typeTok === 'movie' || typeTok === 'pelicula' ? 'movie' : null;
+    case 'sl':
+      return first === 'serie' || first === 'series' || first === 'toon' ? 'series' : first === 'pelicula' || first === 'peliculas' ? 'movie' : null;
+    case 'hs':
+      return first === 'peliculas' ? 'movie' : first === 'series' ? 'series' : null;
+    case 'cv':
+      return flat.indexOf('/tv/') === 0 || flat.indexOf('/serie/') === 0 ? 'series' : flat.indexOf('/pelicula') === 0 ? 'movie' : null;
+    case 'ent':
+      return flat.indexOf('/serie/') === 0 ? 'series' : flat.indexOf('/pelicula/') === 0 ? 'movie' : null;
+    case 'ppd':
+      return flat.indexOf('/serie') !== -1 ? 'series' : flat.indexOf('/pelicula') !== -1 ? 'movie' : null;
+    default: return null; // jkanime y afuera: no se adivina, se deja sin reclamar
+  }
+}
+
+/** Id lo más parecido posible al que search/home construirían para ese ref (mismo sanitizeId). */
+function ownMigrateId(srcId, ref) {
+  const path = ref.slice(srcId.length + 1);
+  const parts = path.split(':');
+  if (srcId === 'tmdb') return sanitizeId('tmdb' + parts[0] + parts[1], 't');
+  let slug = '';
+  if (['cc', 'hs', 'chp', 'chx', 'sl', 'pgh', 'vpo', 'n79', 'ofx'].indexOf(srcId) !== -1 && parts.length >= 2) slug = parts[1];
+  else if (srcId === 'cv' || srcId === 'ent' || srcId === 'ppd') { const seg = path.split('/').filter(Boolean); slug = seg[seg.length - 1] || path; }
+  else slug = parts[0] || path;
+  return sanitizeId(slug, srcId) || sanitizeId(path, srcId);
+}
+
+export async function migrate(input) {
   await kino.sleep(0);
   fetchBudgetReset();
-  let ref = '';
-  if (typeof params === 'string') ref = params;
-  else if (params && typeof params.cursor === 'string') ref = params.cursor;
-  else if (params && params.ref) ref = params.ref;
+  if (!input || typeof input !== 'object') return null;
+  const ref = typeof input.ref === 'string' ? input.ref : '';
+  if (!ref) return null;
+  if (input.kind === 'live') return null; // canales vivos: el ref sigue abriéndose tal cual
+
+  const srcId = ref.split(':')[0];
+  const ours = !!SOURCES[srcId];
+
+  if (input.kind === 'chapter') {
+    if (!ours) return null;
+    const s = parseInt(input.season, 10), n = parseInt(input.episode, 10);
+    if (!s || !n) return null;
+    return { kind: 'episode', ref, season: s, number: n }; // mismo ref, episodio actual
+  }
+
+  if (input.kind === 'title') {
+    if (ours) { // ref nuestro reclamado con su tipo conocido
+      const k = kindOfOwnRef(srcId, ref);
+      if (!k) return null;
+      return { kind: k, id: ownMigrateId(srcId, ref), ref };
+    }
+    if (/^tt\d{5,10}$/.test(ref)) { // IMDb: lo traen Stremio y otros addons
+      if (!tmdbReady()) return null;
+      let j = null;
+      try { j = await tmdbFetch('/find/' + ref, { external_source: 'imdb_id' }); } catch { j = null; }
+      const tv = j && Array.isArray(j.tv_results) && j.tv_results[0];
+      const mv = j && Array.isArray(j.movie_results) && j.movie_results[0];
+      const hit = tv || mv;
+      if (!hit) return null;
+      const k = tv ? 'series' : 'movie';
+      log(`[migrate] ${ref} → n79 ${k} ${hit.id}`);
+      return { kind: k, id: sanitizeId('mig-' + ref, 'yoj'), ref: 'n79:' + k + ':' + hit.id };
+    }
+    return null;
+  }
+  return null;
+}
+
+export async function browse(ref, cursor) {
+  await kino.sleep(0);
+  fetchBudgetReset();
+  if (ref && typeof ref === 'object') { // compat: { ref, cursor }
+    const o = ref;
+    ref = typeof o.ref === 'string' ? o.ref : '';
+    if (typeof o.cursor === 'string') cursor = o.cursor;
+  }
+  ref = typeof ref === 'string' ? ref : '';
 
   log(`[browse] called with ref: "${ref}"`);
+
+  if (ref.startsWith('browse:src:')) { // "Ver más" de una fila de fuente
+    const key = ref.slice(11);
+    const src = SOURCES[key];
+    if (!src || !src.home) { log(`[browse] unknown source row: ${key}`); return { items: [], next: null }; }
+    const items = (await safeHome(src)).filter((x) => !futureYear(x.year));
+    log(`[browse] src ${key}: ${items.length} items`);
+    return { items: items.slice(0, 100), next: null };
+  }
+
+  if (ref.startsWith('browse:tmdb:')) { // "Ver más" de una fila TMDB, con página por cursor
+    let spec = null;
+    try { spec = JSON.parse(decodeURIComponent(ref.slice(12))); } catch { spec = null; }
+    if (!spec || typeof spec.p !== 'string' || (spec.k !== 'movie' && spec.k !== 'series')) {
+      log('[browse] malformed tmdb row ref');
+      return { items: [], next: null };
+    }
+    const page = Math.max(1, parseInt(String(cursor), 10) || 1);
+    const q = Object.assign({}, spec.g || {}, { page: String(page) });
+    const j = await tmdbFetch(spec.p, q);
+    const items = tmdbRowsOf(j, spec.k).filter((x) => !futureYear(x.year));
+    const full = !!(j && Array.isArray(j.results) && j.results.length >= 20);
+    log(`[browse] tmdb page ${page}: ${items.length} items`);
+    return { items: items.slice(0, 100), next: full ? String(page + 1) : null };
+  }
 
   if (ref.startsWith('browse:')) {
     const topic = ref.slice(7);
@@ -3028,6 +3440,7 @@ export async function episodes(params) {
 
   const eps = await src.episodes(path);
   log(`[episodes] ${srcId} returned ${(eps.episodes || []).length} episodes`);
+  rememberEpisodes(ref, eps.episodes || []);
   return { episodes: eps.episodes || [] };
 }
 
@@ -3089,7 +3502,26 @@ export async function resolve(params) {
       throw kino.error('unavailable', 'No se encontró un servidor de reproducción', { userMessage: 'Este título no se ha encontrado en YojaTV' });
     }
     const primary = streams[0];
-    const alts = streams.slice(1, 6).map((s) => ({ label: s.label || 'Servidor', url: s.url, ...(s.headers ? { headers: s.headers } : {}) }));
+    const alts = [];
+    const seenAlt = new Set();
+    const pushAlt = (label, entry) => {
+      if (alts.length >= 8) return;
+      const key = entry.ref || entry.url;
+      if (!key || seenAlt.has(key)) return;
+      seenAlt.add(key);
+      alts.push({ label: String(label || 'Servidor').slice(0, 48), ...entry });
+    };
+    for (const s of streams.slice(1, 6)) pushAlt(s.label, { url: s.url, ...(s.headers ? { headers: s.headers } : {}) });
+    const pushInner = (s) => {
+      for (const a of (Array.isArray(s.alternatives) ? s.alternatives : [])) {
+        if (alts.length >= 8) return;
+        if (!a || typeof a !== 'object') continue;
+        if (typeof a.url === 'string' && a.url) pushAlt(a.label, { url: a.url, ...(a.headers ? { headers: a.headers } : {}) });
+        else if (typeof a.ref === 'string' && a.ref && a.ref.length <= 512) pushAlt(a.label, { ref: a.ref });
+      }
+    };
+    pushInner(primary);
+    for (const s of streams.slice(1, 6)) { if (alts.length >= 8) break; pushInner(s); }
     log(`[resolve OK] merged resolved via ${streams.length} source(s): ${primary.url}`);
     return { url: primary.url, label: primary.label, ...(primary.headers ? { headers: primary.headers } : {}), ...(alts.length ? { alternatives: alts } : {}) };
   }
@@ -3106,4 +3538,121 @@ export async function resolve(params) {
   }
   log(`[resolve OK] stream resolved: ${stream.url}`);
   return labelStream(stream, SOURCES[sid].label || sid);
+}
+
+/* ---------- panel de reproducción (apiVersion 9) ---------- */
+
+const _epSeriesRefs = new Map(); // ref del episodio → ref de la serie (para el elemento episodes)
+
+function rememberEpisodes(seriesRef, list) {
+  if (!seriesRef || !Array.isArray(list)) return;
+  for (const e of list) if (e && typeof e.ref === 'string') _epSeriesRefs.set(e.ref, seriesRef);
+  while (_epSeriesRefs.size > 5000) { const first = _epSeriesRefs.keys().next().value; _epSeriesRefs.delete(first); }
+}
+
+function labelOfRef(ref) {
+  const r = typeof ref === 'string' ? ref : '';
+  if (!r) return null;
+  if (r.indexOf('mg:') === 0) return 'YojaTV';
+  const srcId = r.split(':')[0];
+  return (SOURCES[srcId] && SOURCES[srcId].label) || null;
+}
+
+function netLabel(net) {
+  if (net === 'wifi') return { text: 'Wi-Fi', textEn: 'Wi-Fi' };
+  if (net === 'ethernet') return { text: 'Cable', textEn: 'Wired' };
+  if (net === 'cellular') return { text: 'Datos móviles', textEn: 'Mobile data' };
+  return null;
+}
+
+function speedText(s) {
+  const n = Math.round((Number(s) || 1) * 100) / 100;
+  return String(n);
+}
+
+function nextSpeed(cur) {
+  const cycle = [1, 1.25, 1.5, 1.75, 2];
+  const i = cycle.indexOf(Math.round((Number(cur) || 1) * 100) / 100);
+  return cycle[(i + 1) % cycle.length] || 1;
+}
+
+export async function panel(context) {
+  await kino.sleep(0);
+  const ctx = context || {};
+  const playing = (ctx.playing && ctx.playing.label) ? String(ctx.playing.label) : '';
+  const stats = ctx.stats || {};
+  const parts = [];
+  const srcLabel = labelOfRef(ctx.ref);
+  if (srcLabel) parts.push(srcLabel);
+  if (playing) parts.push(playing);
+  if (stats.width && stats.height) parts.push(stats.width + '×' + stats.height);
+  const net = netLabel(stats.network);
+  if (net) parts.push(net.text);
+  if (typeof stats.bitrateKbps === 'number' && stats.bitrateKbps > 0) parts.push(Math.round(stats.bitrateKbps) + ' kbps');
+
+  const elements = [
+    { type: 'status', text: (parts.join(' · ') || 'Reproduciendo').slice(0, 200), textEn: (parts.join(' · ') || 'Playing').slice(0, 200) }
+  ];
+
+  if (typeof ctx.durationMs === 'number' && ctx.durationMs > 0) {
+    const left = Math.max(0, Math.round((ctx.durationMs - (Number(ctx.positionMs) || 0)) / 60000));
+    elements.push({ type: 'text', text: 'Faltan ' + left + ' min', textEn: left + ' min left' });
+  }
+
+  const stepMs = Number(ctx.seekStepMs) || (ctx.player && Number(ctx.player.seekStepMs)) || 10000;
+  const speed = (ctx.player && Number(ctx.player.speed)) || 1;
+  elements.push({
+    type: 'row', gap: 'small', children: [
+      { type: 'button', key: 'seekback', label: 'Atrás', labelEn: 'Back' },
+      { type: 'button', key: 'seekfwd', label: 'Adelante', labelEn: 'Forward' },
+      { type: 'button', key: 'speed', label: 'Velocidad ' + speedText(speed), labelEn: 'Speed ' + speedText(speed) }
+    ]
+  });
+
+  elements.push({
+    type: 'select', key: 'step', label: 'Paso', labelEn: 'Step', scope: 'plugin', autoSave: true,
+    hint: 'Paso de Atrás y Adelante', hintEn: 'Back and Forward step',
+    options: [
+      { value: '10', label: '10 s' },
+      { value: '15', label: '15 s' },
+      { value: '30', label: '30 s' }
+    ]
+  });
+
+  if (ctx.kind === 'episode') {
+    const seriesRef = _epSeriesRefs.get(String(ctx.ref || ''));
+    if (seriesRef) elements.push({ type: 'episodes', ref: seriesRef });
+  }
+
+  log(`[panel] "${String(ctx.title || '').slice(0, 40)}" step=${stepMs} speed=${speed} elements=${elements.length}`);
+  return { title: String(ctx.title || '').slice(0, 60), accent: '#FF6B00', refreshMs: 10000, elements };
+}
+
+export async function panelAction(event, context) {
+  await kino.sleep(0);
+  const e = event || {};
+  const ctx = context || {};
+  const pos = Number(ctx.positionMs) || 0;
+  const stepMs = Number(ctx.seekStepMs) || (ctx.player && Number(ctx.player.seekStepMs)) || 10000;
+
+  if (e.trigger === 'press' && e.key === 'seekback') return { player: { seekToMs: Math.max(0, pos - stepMs) } };
+  if (e.trigger === 'press' && e.key === 'seekfwd') return { player: { seekToMs: pos + stepMs } };
+  if (e.trigger === 'press' && e.key === 'speed') {
+    const cur = (ctx.player && Number(ctx.player.speed)) || 1;
+    return { player: { speed: nextSpeed(cur) }, message: 'Velocidad cambiada' };
+  }
+  if (e.trigger === 'change' && e.key === 'step') {
+    const n = parseInt(String(e.value), 10);
+    if (n >= 5 && n <= 120) return { player: { seekStepMs: n * 1000 } };
+    return null;
+  }
+  return null;
+}
+
+export async function playerEvent(event) {
+  try {
+    const t = event && event.type;
+    if (t) log(`[playerEvent] ${t}${event.label ? ' · ' + String(event.label).slice(0, 48) : ''}${event.kind ? ' (' + event.kind + ')' : ''}`);
+  } catch {}
+  return null;
 }

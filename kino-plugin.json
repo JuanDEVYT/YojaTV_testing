@@ -1,61 +1,128 @@
 {
   "id": "yoja-tv-kino",
   "name": "YojaTV-alpha",
-  "version": "5.3.4",
-  "apiVersion": 6,
+  "version": "6.0.0",
+  "apiVersion": 9,
   "entry": "plugin.js",
   "description": "Plugin de YojaTV para Kino TV. Películas de cine en español latino, series y anime. Creado por JuandreXter, YojanderGaming y einer_bg.",
   "author": "JuandreXter, YojanderGaming, einer_bg",
   "homepage": "https://github.com/YojaTV-kino/YojaTV_plugin",
   "browser": "pages",
   "streamHosts": "any",
+  "fetchHosts": "any",
+  "color": "#FF6B00",
   "debug": true,
   "telemetry": "verbose",
+  "panel": {
+    "label": "YojaTV",
+    "labelEn": "YojaTV",
+    "iconFile": "panel-icon.png"
+  },
   "settings": [
     {
       "key": "tmdbKey",
       "label": "API Key de TMDB",
+      "labelEn": "TMDB API key",
       "type": "password",
-      "hint": "Gratis en themoviedb.org ▸ Settings ▸ API"
+      "hint": "Opcional. Gratis en themoviedb.org ▸ Settings ▸ API",
+      "hintEn": "Optional. Free at themoviedb.org ▸ Settings ▸ API"
     },
     {
       "key": "tmdbLang",
       "label": "Idioma del catálogo",
+      "labelEn": "Catalog language",
       "type": "select",
       "default": "es-MX",
       "options": [
         {
           "value": "es-MX",
-          "label": "Español (Latinoamérica)"
+          "label": "Español (Latinoamérica)",
+          "labelEn": "Spanish (Latin America)"
         },
         {
           "value": "es-ES",
-          "label": "Español (España)"
+          "label": "Español (España)",
+          "labelEn": "Spanish (Spain)"
         },
         {
           "value": "en-US",
-          "label": "English"
+          "label": "English",
+          "labelEn": "English"
         },
         {
           "value": "pt-BR",
-          "label": "Português"
+          "label": "Português",
+          "labelEn": "Portuguese"
         }
       ]
     },
     {
       "key": "sourceRows",
       "label": "Filas de las fuentes",
+      "labelEn": "Source rows",
       "type": "toggle",
-      "default": true
+      "default": true,
+      "hint": "Muestra las filas de cada fuente en Inicio",
+      "hintEn": "Shows each source's rows on Home"
     },
     {
       "key": "estado",
       "label": "Estado",
+      "labelEn": "Status",
       "type": "status"
+    },
+    {
+      "key": "clearCache",
+      "label": "Limpiar caché del catálogo",
+      "labelEn": "Clear catalog cache",
+      "type": "action",
+      "confirm": "¿Borrar la caché de TMDB del catálogo?",
+      "confirmEn": "Delete the TMDB catalog cache?"
+    },
+    {
+      "key": "testTmdb",
+      "label": "Probar conexión con TMDB",
+      "labelEn": "Test TMDB connection",
+      "type": "action"
+    }
+  ],
+  "settingsLayout": [
+    {
+      "type": "card",
+      "title": "Catálogo",
+      "titleEn": "Catalog",
+      "children": [
+        {
+          "setting": "tmdbKey"
+        },
+        {
+          "setting": "tmdbLang"
+        },
+        {
+          "setting": "sourceRows"
+        }
+      ]
+    },
+    {
+      "type": "card",
+      "title": "Diagnóstico",
+      "titleEn": "Diagnostics",
+      "children": [
+        {
+          "setting": "estado"
+        },
+        {
+          "setting": "clearCache"
+        },
+        {
+          "setting": "testTmdb"
+        }
+      ]
     }
   ],
   "section": {
-    "label": "YojaTV"
+    "label": "YojaTV",
+    "labelEn": "YojaTV"
   },
   "theme": {
     "accent": "#FF6B00",
@@ -75,7 +142,9 @@
     "browse",
     "episodes",
     "resolve",
-    "download"
+    "download",
+    "migrate",
+    "scopedSearch"
   ],
   "hosts": [
     "ver-peliculas-online.net",
@@ -231,6 +300,6 @@
   "icon": "icon.png",
   "signature": {
     "authorKey": "c3caf0f9e51197553082904a2655d51e5afcca579a3048cdfbd8a97f7b2cf2c3",
-    "value": "e0f1b18ee379a5fdc79c7e1cfb6bb2ed5a78dfc9d745d8dc56d78e3a179536ade2ce0d109056fd09ea9f7113d8883620cc96d9594c03111690a9d240bf700102"
+    "value": "ed05c15f434cacdf6fe998aa1cdbd0e9c88d77b0d0f4e46051339fd28ee1e8a1c5493c678f523ef0a1da0d5738649874caac79361270639a66b99ec06af7e60d"
   }
 }

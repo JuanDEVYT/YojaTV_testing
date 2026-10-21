@@ -24,15 +24,20 @@ function freshCatalogCall() {
 
 const plugin = await import('../plugin.js');
 
-test('manifest is apiVersion 6 with browser pages', () => {
-  assert.equal(manifest.apiVersion, 6);
+test('manifest is apiVersion 9 with browser pages', () => {
+  assert.equal(manifest.apiVersion, 9);
   assert.equal(manifest.browser, 'pages');
   assert.ok(Array.isArray(manifest.hosts) && manifest.hosts.length > 20);
   assert.equal(manifest.streamHosts, 'any');
+  assert.equal(manifest.fetchHosts, 'any');
   assert.ok(manifest.theme, 'manifest must declare theme');
   assert.equal(manifest.theme.accent, '#FF6B00');
+  assert.equal(manifest.color, '#FF6B00');
   assert.ok(manifest.section, 'manifest must declare section');
   assert.equal(manifest.section.label, 'YojaTV');
+  assert.ok(manifest.panel && manifest.panel.iconFile, 'manifest must declare the player panel');
+  assert.ok(Array.isArray(manifest.capabilities) && manifest.capabilities.includes('migrate'), 'migrate capability');
+  assert.ok(Array.isArray(manifest.settingsLayout) && manifest.settingsLayout.some((s) => s.type === 'card'), 'settingsLayout cards');
   assert.deepEqual(manifest.categories, ['movies', 'series', 'anime']);
 });
 
@@ -365,4 +370,239 @@ test('tmdb resolve caps candidates at 10 so the fetch budget survives', { skip: 
   } finally {
     globalThis.kino = real;
   }
+});
+
+/* ---------- 6.0.0: fila "Ver más", scopedSearch, migrate, panel, action ---------- */
+
+test('manifest declares the scopedSearch capability', () => {
+  assert.ok(Array.isArray(manifest.capabilities) && manifest.capabilities.includes('scopedSearch'), 'scopedSearch capability');
+});
+
+test('home rows carry a browse ref for "Ver más"', { skip: !hasFixtures }, async () => {
+  freshCatalogCall();
+  const rows = await plugin.home();
+  assert.ok(rows.length > 0, 'home must return rows');
+  for (const row of rows) {
+    assert.ok(typeof row.ref === 'string' && row.ref.startsWith('browse:'), 'row ref must be a browse ref: ' + row.id);
+    assert.ok(row.ref.length <= 4096, 'row ref within limit');
+  }
+});
+
+test('section rows carry a browse ref for "Ver más"', { skip: !hasFixtures }, async () => {
+  freshCatalogCall();
+  const sec = await plugin.section('peliculas');
+  assert.ok(sec.rows.length > 0, 'section must return rows');
+  for (const row of sec.rows) {
+    assert.ok(typeof row.ref === 'string' && row.ref.startsWith('browse:'), 'row ref must be a browse ref: ' + row.id);
+  }
+});
+
+test('browse opens a source row ref with the two-argument signature', { skip: !hasFixtures }, async () => {
+  freshCatalogCall();
+  const page = await plugin.browse('browse:src:sl', null);
+  assert.ok(page && Array.isArray(page.items), 'browse must return a page');
+  assert.ok(page.items.length > 0, 'a source row must open');
+  assert.equal(page.next, null, 'source rows have no further pages');
+  for (const it of page.items) assert.ok(it.ref && it.id, 'page items are full items');
+});
+
+test('browse opens the classic topic refs unchanged', { skip: !hasFixtures }, async () => {
+  freshCatalogCall();
+  const page = await plugin.browse('browse:movies', null);
+  assert.ok(page && Array.isArray(page.items) && page.items.length > 0, 'topic browse keeps working');
+});
+
+test('browse pages a TMDB row ref through its cursor', async () => {
+  freshCatalogCall();
+  const real = globalThis.kino;
+  const seen = [];
+  const fake = async (path, params) => {
+    seen.push({ path, page: params && params.page });
+    return { results: Array.from({ length: 20 }, (_, i) => ({
+      id: 900000 + i, media_type: 'movie', title: 'Película ' + i, overview: '', adult: false,
+      backdrop_path: '/b.jpg', poster_path: '/p.jpg', vote_average: 6, release_date: '2024-01-01'
+    })) };
+  };
+  globalThis.kino = { ...real, tmdb: fake };
+  try {
+    const ref = 'browse:tmdb:' + encodeURIComponent(JSON.stringify({ p: '/movie/popular', k: 'movie', g: null }));
+    const page1 = await plugin.browse(ref, null);
+    assert.equal(seen[0].page, '1', 'the first page is page 1');
+    assert.equal(page1.items.length, 20, 'a full page comes back');
+    assert.equal(page1.next, '2', 'a full page offers the next cursor');
+    const page2 = await plugin.browse(ref, page1.next);
+    assert.equal(seen[1].page, '2', 'the cursor drives the next page');
+    assert.equal(page2.next, '3', 'the fixture page is still full, so it still offers a next cursor');
+    assert.ok(!page1.items.some((it) => it.ref.startsWith('browse:')), 'page items are titles, not rows');
+  } finally {
+    globalThis.kino = real;
+  }
+});
+
+test('search within a row ref filters locally and answers null when it cannot', async () => {
+  freshCatalogCall();
+  const real = globalThis.kino;
+  const fake = async () => ({ results: Array.from({ length: 5 }, (_, i) => ({
+    id: 910000 + i, media_type: 'movie', title: i === 0 ? 'Alpha Película' : 'Otra Cinta ' + i, overview: '', adult: false,
+    backdrop_path: '/b.jpg', poster_path: '/p.jpg', vote_average: 6, release_date: '2024-01-01'
+  })) });
+  globalThis.kino = { ...real, tmdb: fake };
+  try {
+    const within = 'browse:tmdb:' + encodeURIComponent(JSON.stringify({ p: '/movie/popular', k: 'movie', g: null }));
+    const hits = await plugin.search({ q: 'alpha', within });
+    assert.ok(Array.isArray(hits), 'scoped search answers an array');
+    assert.equal(hits.length, 1, 'the local filter keeps only the match');
+    assert.equal(hits[0].title, 'Alpha Película');
+    const empty = await plugin.search({ q: 'zzz-nada', within });
+    assert.deepEqual(empty, [], 'no match inside the scope is an empty list');
+    const unknown = await plugin.search({ q: 'algo', within: 'browse:src:nope' });
+    assert.equal(unknown, null, 'an unopenable scope answers null so Kino filters itself');
+  } finally {
+    globalThis.kino = real;
+  }
+});
+
+test('migrate claims an IMDb id through TMDB as an n79 ref', async () => {
+  freshCatalogCall();
+  const real = globalThis.kino;
+  const fake = async (path) => {
+    if (path.indexOf('/find/tt13999') === 0) {
+      return { movie_results: [], tv_results: [{ id: 1399, name: 'Juego de tronos' }] };
+    }
+    return { results: [] };
+  };
+  globalThis.kino = { ...real, tmdb: fake };
+  try {
+    const ans = await plugin.migrate({ kind: 'title', ref: 'tt1399999' });
+    assert.ok(ans, 'an IMDb id must be claimed');
+    assert.equal(ans.kind, 'series', 'the TMDB answer decides the kind');
+    assert.equal(ans.ref, 'n79:series:1399', 'the claimed ref must open in this plugin');
+    assert.match(ans.id, /^[A-Za-z0-9._~-]{1,128}$/, 'the id must match the item id pattern');
+  } finally {
+    globalThis.kino = real;
+  }
+});
+
+test('migrate claims own refs with their known kind and refuses foreign ones', async () => {
+  const movie = await plugin.migrate({ kind: 'title', ref: 'cc:movie:batman-begins' });
+  assert.ok(movie, 'an own movie ref must be claimed');
+  assert.equal(movie.kind, 'movie');
+  assert.equal(movie.ref, 'cc:movie:batman-begins', 'the ref is kept as is');
+  assert.match(movie.id, /^[A-Za-z0-9._~-]{1,128}$/);
+
+  const serie = await plugin.migrate({ kind: 'title', ref: 'n79:series:1399' });
+  assert.ok(serie && serie.kind === 'series', 'an own series ref must be claimed as series');
+
+  const foreign = await plugin.migrate({ kind: 'title', ref: 'str:tt1234567' });
+  assert.equal(foreign, null, 'a ref that is not ours and not IMDb is not claimed');
+
+  const live = await plugin.migrate({ kind: 'live', ref: 'pluto:canal' });
+  assert.equal(live, null, 'live refs stay untouched');
+
+  const chapter = await plugin.migrate({ kind: 'chapter', ref: 'cc:serie:algo', season: '3', episode: '7' });
+  assert.ok(chapter, 'an own chapter ref must be claimed');
+  assert.equal(chapter.kind, 'episode');
+  assert.equal(chapter.ref, 'cc:serie:algo', 'the chapter ref is kept');
+  assert.equal(chapter.season, 3);
+  assert.equal(chapter.number, 7);
+});
+
+test('action clearCache empties the TMDB cache entries', async () => {
+  kino.storage.set('tmdb:/movie/popular', JSON.stringify({ t: Date.now(), v: { results: [] } }));
+  const ans = await plugin.action('clearCache');
+  assert.ok(ans && typeof ans.message === 'string', 'the action answers a message');
+  assert.ok(ans.message.length <= 300, 'the message is short');
+  assert.equal(kino.storage.get('tmdb:/movie/popular'), null, 'the entry must be gone');
+  const unknown = await plugin.action('nope');
+  assert.equal(unknown, null, 'an unknown action answers null');
+});
+
+test('action testTmdb reports the TMDB state', async () => {
+  const real = globalThis.kino;
+  const fake = async (path) => path === '/configuration' ? { images: {} } : null;
+  globalThis.kino = { ...real, tmdb: fake };
+  try {
+    const ans = await plugin.action('testTmdb');
+    assert.ok(ans && ans.message.indexOf('TMDB responde bien') === 0, 'a working TMDB answers well: ' + (ans && ans.message));
+  } finally {
+    globalThis.kino = real;
+  }
+  const noKey = { ...real, tmdb: undefined };
+  globalThis.kino = noKey;
+  try {
+    const ans = await plugin.action('testTmdb');
+    assert.ok(ans && ans.message.indexOf('Falta') === 0, 'no key at all says so');
+  } finally {
+    globalThis.kino = real;
+  }
+});
+
+test('validateSettings rejects a bad language code and a refused key', async () => {
+  const badLang = await plugin.validateSettings({ tmdbLang: 'Español' });
+  assert.ok(badLang && badLang.tmdbLang, 'a non-code language is rejected');
+  const okLang = await plugin.validateSettings({ tmdbLang: 'es-MX' });
+  assert.equal(okLang, null, 'a real code passes');
+  const real = globalThis.kino;
+  globalThis.kino = { ...real, fetch: async () => ({ ok: false, status: 401, headers: {}, json: async () => ({}) }) };
+  try {
+    const badKey = await plugin.validateSettings({ tmdbKey: 'mala' });
+    assert.ok(badKey && badKey.tmdbKey, 'a refused key is rejected');
+  } finally {
+    globalThis.kino = real;
+  }
+});
+
+test('panel draws status, transport, step and the series episodes', { skip: !hasFixtures }, async () => {
+  const ctx = {
+    kind: 'movie', ref: 'cc:movie:x', title: 'Película de prueba', ids: {},
+    playing: { label: 'Servidor 1080p' }, positionMs: 60000, durationMs: 600000, paused: false,
+    seekStepMs: 10000, stats: { width: 1280, height: 720, network: 'wifi' },
+    device: 'tv', lang: 'es-CO', values: { video: {}, plugin: {} },
+    player: { seekStepMs: 10000, speed: 1 }
+  };
+  const p = await plugin.panel(ctx);
+  assert.ok(p && Array.isArray(p.elements), 'panel returns elements');
+  assert.ok(p.title && p.title.length <= 60, 'title within limit');
+  assert.equal(p.accent, '#FF6B00', 'the brand accent');
+  assert.ok(p.refreshMs >= 2000 && p.refreshMs <= 60000, 'refreshMs within bounds');
+  const status = p.elements.find((el) => el.type === 'status');
+  assert.ok(status && status.text.includes('Servidor 1080p'), 'the status names the copy');
+  const row = p.elements.find((el) => el.type === 'row');
+  assert.ok(row && row.children.length === 3, 'the transport row has three buttons');
+  const sel = p.elements.find((el) => el.type === 'select');
+  assert.ok(sel && sel.key === 'step' && sel.options.length === 3, 'the step select is there');
+  assert.equal(p.elements.filter((el) => !el.type || typeof el.type !== 'string').length, 0, 'every element has a type');
+
+  // Una vez vistas las episodios de una serie, el panel de un episodio la lista.
+  const eps = await plugin.episodes({ ref: 'jkanime:one-piece' });
+  assert.ok(eps.episodes.length > 0, 'fixtures must provide episodes');
+  const epCtx = { ...ctx, kind: 'episode', ref: eps.episodes[0].ref, title: 'One Piece' };
+  const p2 = await plugin.panel(epCtx);
+  const listEl = p2.elements.find((el) => el.type === 'episodes');
+  assert.ok(listEl && listEl.ref === 'jkanime:one-piece', 'the panel links the series episodes');
+});
+
+test('panelAction seeks with the step, cycles the speed and applies the step select', async () => {
+  const ctx = {
+    kind: 'movie', ref: 'cc:movie:x', title: 'X', ids: {}, playing: {}, positionMs: 120000,
+    paused: false, seekStepMs: 15000, stats: {}, device: 'tv', lang: 'es-CO',
+    values: { video: {}, plugin: {} }, player: { seekStepMs: 15000, speed: 1 }
+  };
+  const back = await plugin.panelAction({ key: 'seekback', trigger: 'press', values: {} }, ctx);
+  assert.equal(back.player.seekToMs, 105000, 'back subtracts the step in effect');
+  const fwd = await plugin.panelAction({ key: 'seekfwd', trigger: 'press', values: {} }, ctx);
+  assert.equal(fwd.player.seekToMs, 135000, 'forward adds the step in effect');
+  const sp = await plugin.panelAction({ key: 'speed', trigger: 'press', values: {} }, ctx);
+  assert.equal(sp.player.speed, 1.25, 'the speed cycles forward');
+  const step = await plugin.panelAction({ key: 'step', trigger: 'change', values: {}, value: '30' }, ctx);
+  assert.equal(step.player.seekStepMs, 30000, 'the select applies the step in ms');
+  const junk = await plugin.panelAction({ key: 'speed', trigger: 'press', values: {} }, { ...ctx, positionMs: 0 });
+  assert.equal(junk.player.seekToMs, undefined, 'unknown combinations answer nothing extra');
+  const none = await plugin.panelAction({ key: 'otra', trigger: 'press', values: {} }, ctx);
+  assert.equal(none, null, 'an unknown key answers null');
+});
+
+test('playerEvent answers null and just logs', async () => {
+  const out = await plugin.playerEvent({ type: 'failed', kind: 'timeout' }, {});
+  assert.equal(out, null, 'playerEvent is fire and forget');
 });
