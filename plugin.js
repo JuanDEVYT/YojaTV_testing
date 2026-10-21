@@ -137,7 +137,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '5.3.3';
+const PLUGIN_VERSION = '5.3.4';
 
 function log(...args) {
   try {
