@@ -142,7 +142,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '6.0.0';
+const PLUGIN_VERSION = '6.0.1';
 
 function log(...args) {
   try {
@@ -174,6 +174,8 @@ function futureYear(y) {
   return Number.isFinite(n) && n > new Date().getFullYear();
 }
 
+const DEFAULT_FETCH_TIMEOUT_MS = 7000;
+
 async function fetchText(url, headers, timeoutMs) {
   if (FETCH_BUDGET <= 0) {
     log(`[HTTP GET BUDGET] cupo de 60 por llamada agotado <- ${url}`);
@@ -184,7 +186,7 @@ async function fetchText(url, headers, timeoutMs) {
   try {
     const opts = { headers: { ...HEADERS, ...(headers || {}) } };
     const t = Math.trunc(Number(timeoutMs));
-    if (Number.isFinite(t) && t > 0) opts.timeoutMs = Math.min(t, 30000);
+    opts.timeoutMs = Math.min(Number.isFinite(t) && t > 0 ? t : DEFAULT_FETCH_TIMEOUT_MS, 30000);
     const res = await kino.fetch(url, opts);
     if (!res.ok) {
       log(`[HTTP GET FAIL] ${res.status} <- ${url}`);
@@ -2882,9 +2884,10 @@ registerSource({
 
 /* ---------- fan-out orchestration ---------- */
 
-const SEARCH_CONCURRENCY = 5;
+const SEARCH_CONCURRENCY = 7;
+const HOME_CONCURRENCY = 7;
 
-async function mapLimit(list, limit, fn) {
+async function mapLimit(list, limit, fn, deadlineAt) {
   const out = new Array(list.length);
   let cursor = 0;
   const workers = [];
@@ -2893,12 +2896,33 @@ async function mapLimit(list, limit, fn) {
     workers.push((async () => {
       while (cursor < list.length) {
         const idx = cursor++;
+        if (deadlineAt && Date.now() >= deadlineAt) { out[idx] = []; continue; } // sin plazo: no se embarca
         out[idx] = await fn(list[idx], idx);
       }
     })());
   }
   await Promise.all(workers);
   return out;
+}
+
+/**
+ * Corte duro de plazo: responde `tag` cuando no quedan ms (Kino mata la
+ * llamada a los 20 s y devolvía timeout vacío). La promesa sigue de fondo;
+ * el reloj se apaga solo en cuanto ella gana.
+ */
+function raceDeadline(promise, ms, tag) {
+  let done = false;
+  const p = Promise.resolve(promise).then((v) => { done = true; return v; }, (e) => { done = true; throw e; });
+  const watch = (async () => {
+    let left = Math.max(0, Math.trunc(Number(ms) || 0));
+    while (!done && left > 0) {
+      const step = Math.min(5000, left);
+      await kino.sleep(step);
+      left -= step;
+    }
+    return done ? undefined : tag;
+  })();
+  return Promise.race([p, watch]);
 }
 
 async function safeSearch(src, q) {
@@ -3036,15 +3060,19 @@ export async function search(params) {
   if (!query) return [];
 
   const ids = Object.keys(SOURCES).filter((id) => id !== 'tmdb');
+  const startedAt = Date.now();
+  const deadlineAt = startedAt + 13000; // search deja 15 s: margen para rankear
   log(`[search] dispatching query across ${ids.length} sources`);
-  const groups = await mapLimit(ids, SEARCH_CONCURRENCY, async (id, idx) => {
+  const all = [];
+  const groups = mapLimit(ids, SEARCH_CONCURRENCY, async (id) => {
     const hits = await safeSearch(SOURCES[id], query);
     log(`[search] source ${id}: ${hits.length} items`);
+    for (const it of hits) if (it) all.push(it); // incremental: el corte conserva lo ya llegado
     return hits;
-  });
-  const all = [];
-  for (const g of groups) for (const it of g) if (it) all.push(it);
-  await tmdbEnrich(all, query);
+  }, deadlineAt);
+  const settled = await raceDeadline(groups, 13000, 'deadline');
+  if (settled === 'deadline') log('[search] plazo alcanzado: se rankea lo que ya llegó');
+  if (Date.now() < startedAt + 9000) await tmdbEnrich(all, query);
   const kept = all.filter((it) => !futureYear(it.year));
   const results = mergeAndRank([kept], query).slice(0, 100);
   log(`[search] total ranked results: ${results.length}`);
@@ -3056,9 +3084,11 @@ export async function home() {
   fetchBudgetReset();
   log('[home] loading rows');
 
-  const rows = await tmdbHomeRows();
-
-  if (tmdbWantSourceRows()) {
+  const rows = [];
+  const startedAt = Date.now();
+  const pTmdb = tmdbHomeRows().then((r) => { for (const row of r) rows.push(row); });
+  const pSrc = (async () => {
+    if (!tmdbWantSourceRows()) return;
     const sourcesList = [
       { key: 'sl', id: 'sl-estrenos', title: '🎬 SoloLatino · Estrenos', genre: 'peliculas' },
       { key: 'cc', id: 'cc-peliculas', title: '🍿 CineCalidad · Películas', genre: 'peliculas' },
@@ -3074,12 +3104,17 @@ export async function home() {
       { key: 'afv', id: 'afv-anime', title: '⭐ AnimeFLV · Populares', genre: 'anime' },
       { key: 'jkanime', id: 'jk-episodios', title: '🎯 JKAnime · Últimos episodios', genre: 'anime' }
     ];
-    const settled = await mapLimit(sourcesList, SEARCH_CONCURRENCY, (s) => safeHome(SOURCES[s.key]));
-    sourcesList.forEach((s, idx) => {
-      const items = (settled[idx] || []).filter((x) => !futureYear(x.year));
+    await mapLimit(sourcesList, HOME_CONCURRENCY, async (s) => {
+      const items = (await safeHome(SOURCES[s.key])).filter((x) => !futureYear(x.year));
       log(`[home] ${s.key}: ${items.length} items`);
       if (items.length) rows.push({ id: s.id, title: s.title, items: items.slice(0, 30), genre: s.genre, ref: 'browse:src:' + s.key });
-    });
+    }, startedAt + 14000);
+  })();
+
+  const done = await raceDeadline(Promise.all([pTmdb, pSrc]), 15000, 'deadline');
+  if (done === 'deadline') {
+    log('[home] plazo de 15 s: responde con las filas ya armadas');
+    return rows.map((r) => ({ ...r, items: [...r.items] })); // copia: lo abandonado sigue corriendo
   }
 
   log(`[home] total rows: ${rows.length}`);
@@ -3108,69 +3143,81 @@ export async function section(param) {
   };
 
   const rows = [];
+  const startedAt = Date.now();
+  const deadlineAt = startedAt + 15000; // section deja 20 s: margen para el filtrado final
   // TMDB catalog rows for this tab (rich: ids.tmdb + backdrop + overview) fetched alongside the source rows.
-  const tmdbP = tmdbTabRows(selectedTab);
+  const work = (async () => {
+    const tmdbP = tmdbTabRows(selectedTab);
 
-  if (selectedTab === 'peliculas') {
-    const list = [
-      { key: 'sl', id: 'sec-sl-movies', title: '🎬 SoloLatino · Películas' },
-      { key: 'cc', id: 'sec-cc-movies', title: '🍿 CineCalidad · Novedades' },
-      { key: 'hs', id: 'sec-hs-movies', title: '⚡ HackStore · Cartelera' },
-      { key: 'vpo', id: 'sec-vpo-movies', title: '🌟 VerPelículasOnline · Estrenos' },
-      { key: 'pgh', id: 'sec-pgh-movies', title: '🎥 PelisGratisHDs · HD' },
-      { key: 'ppd', id: 'sec-ppd-movies', title: '✨ PelisPlusHD · Cine' },
-      { key: 'ent', id: 'sec-ent-movies', title: '💎 EntrePelículas · Selección' },
-      { key: 'n79', id: 'sec-n79-movies', title: '🏆 Net79 · Películas Populares' },
-      { key: '1mv', id: 'sec-1mv-movies', title: '🌍 1Movies · Global' }
-    ];
-    const got = await mapLimit(list, SEARCH_CONCURRENCY, (s) => safeHome(SOURCES[s.key]));
-    list.forEach((s, i) => {
-      const mv = (got[i] || []).filter((x) => x.kind === 'movie');
-      if (mv.length) rows.push({ id: s.id, title: s.title, items: mv.slice(0, 30), genre: 'peliculas', ref: 'browse:src:' + s.key });
-    });
-  } else if (selectedTab === 'series') {
-    const list = [
-      { key: 'cv', id: 'sec-cv-series', title: '📺 CuevanaSerie · Populares' },
-      { key: 'sl', id: 'sec-sl-series', title: '🔥 SoloLatino · Temporadas' },
-      { key: 'pgh', id: 'sec-pgh-series', title: '✨ PelisGratisHDs · Series' },
-      { key: 'ent', id: 'sec-ent-series', title: '💎 EntrePelículas · Capítulos' },
-      { key: 'n79', id: 'sec-n79-series', title: '🏆 Net79 · Series Populares' }
-    ];
-    const got = await mapLimit(list, SEARCH_CONCURRENCY, (s) => safeHome(SOURCES[s.key]));
-    list.forEach((s, i) => {
-      const sv = (got[i] || []).filter((x) => x.kind === 'series');
-      if (sv.length) rows.push({ id: s.id, title: s.title, items: sv.slice(0, 30), genre: 'series', ref: 'browse:src:' + s.key });
-    });
-  } else if (selectedTab === 'anime') {
-    const list = [
-      { key: 'av1', id: 'sec-av1-anime', title: '🔥 AnimeAV1 · Últimos episodios' },
-      { key: 'afv', id: 'sec-afv-anime', title: '⭐ AnimeFLV · En emisión' },
-      { key: 'jkanime', id: 'sec-jk-anime', title: '🎯 JKAnime · Lo más visto' }
-    ];
-    const got = await mapLimit(list, SEARCH_CONCURRENCY, (s) => safeHome(SOURCES[s.key]));
-    list.forEach((s, i) => {
-      const an = got[i] || [];
-      if (an.length) rows.push({ id: s.id, title: s.title, items: an.slice(0, 30), genre: 'anime', ref: 'browse:src:' + s.key });
-    });
+    if (selectedTab === 'peliculas') {
+      const list = [
+        { key: 'sl', id: 'sec-sl-movies', title: '🎬 SoloLatino · Películas' },
+        { key: 'cc', id: 'sec-cc-movies', title: '🍿 CineCalidad · Novedades' },
+        { key: 'hs', id: 'sec-hs-movies', title: '⚡ HackStore · Cartelera' },
+        { key: 'vpo', id: 'sec-vpo-movies', title: '🌟 VerPelículasOnline · Estrenos' },
+        { key: 'pgh', id: 'sec-pgh-movies', title: '🎥 PelisGratisHDs · HD' },
+        { key: 'ppd', id: 'sec-ppd-movies', title: '✨ PelisPlusHD · Cine' },
+        { key: 'ent', id: 'sec-ent-movies', title: '💎 EntrePelículas · Selección' },
+        { key: 'n79', id: 'sec-n79-movies', title: '🏆 Net79 · Películas Populares' },
+        { key: '1mv', id: 'sec-1mv-movies', title: '🌍 1Movies · Global' }
+      ];
+      await mapLimit(list, HOME_CONCURRENCY, async (s) => {
+        const mv = (await safeHome(SOURCES[s.key])).filter((x) => x.kind === 'movie');
+        if (mv.length) rows.push({ id: s.id, title: s.title, items: mv.slice(0, 30), genre: 'peliculas', ref: 'browse:src:' + s.key });
+      }, startedAt + 8000);
+    } else if (selectedTab === 'series') {
+      const list = [
+        { key: 'cv', id: 'sec-cv-series', title: '📺 CuevanaSerie · Populares' },
+        { key: 'sl', id: 'sec-sl-series', title: '🔥 SoloLatino · Temporadas' },
+        { key: 'pgh', id: 'sec-pgh-series', title: '✨ PelisGratisHDs · Series' },
+        { key: 'ent', id: 'sec-ent-series', title: '💎 EntrePelículas · Capítulos' },
+        { key: 'n79', id: 'sec-n79-series', title: '🏆 Net79 · Series Populares' }
+      ];
+      await mapLimit(list, HOME_CONCURRENCY, async (s) => {
+        const sv = (await safeHome(SOURCES[s.key])).filter((x) => x.kind === 'series');
+        if (sv.length) rows.push({ id: s.id, title: s.title, items: sv.slice(0, 30), genre: 'series', ref: 'browse:src:' + s.key });
+      }, startedAt + 8000);
+    } else if (selectedTab === 'anime') {
+      const list = [
+        { key: 'av1', id: 'sec-av1-anime', title: '🔥 AnimeAV1 · Últimos episodios' },
+        { key: 'afv', id: 'sec-afv-anime', title: '⭐ AnimeFLV · En emisión' },
+        { key: 'jkanime', id: 'sec-jk-anime', title: '🎯 JKAnime · Lo más visto' }
+      ];
+      await mapLimit(list, HOME_CONCURRENCY, async (s) => {
+        const an = await safeHome(SOURCES[s.key]);
+        if (an.length) rows.push({ id: s.id, title: s.title, items: an.slice(0, 30), genre: 'anime', ref: 'browse:src:' + s.key });
+      }, startedAt + 8000);
+    }
+
+    let tmdb = await raceDeadline(tmdbP, Math.max(1, startedAt + 12000 - Date.now()), 'late');
+    if (tmdb === 'late' || !tmdb || !Array.isArray(tmdb.rows)) tmdb = { rows: [], heroImage: null };
+    if (tmdb.heroImage) hero.image = tmdb.heroImage;
+    // Give source rows the info-page fields Kino won't invent (ids.tmdb drives synopsis/rating/genres/cast;
+    // backdrop only counts if we provide it). One round-robin pass so every row shares the bounded budget.
+    const cols = rows.map((r) => r.items);
+    const flat = [];
+    const maxLen = cols.reduce((m, c) => Math.max(m, c.length), 0);
+    for (let i = 0; i < maxLen; i++) for (const c of cols) if (c[i]) flat.push(c[i]);
+    const enrichMs = startedAt + 14000 - Date.now();
+    if (enrichMs > 1500) await raceDeadline(enrichDetails(flat, 36), enrichMs, 'late');
+    // Ocultos del catálogo: fecha TMDB futura sin estrenar (__rel) o año futuro.
+    for (const r of rows) r.items = r.items.filter((x) => !futureYear(x.year) && !x.__rel);
+    const liveRows = rows.filter((r) => r.items.length);
+    // TMDB rows first: they always carry full details and resolve via the n79 id fast path.
+    liveRows.unshift(...tmdb.rows);
+    rows.length = 0;
+    for (const r of liveRows) rows.push(r);
+  })();
+
+  const done = await raceDeadline(work, deadlineAt - startedAt, 'deadline');
+  if (done === 'deadline') {
+    log('[section] plazo de 15 s: responde con las filas ya armadas');
+    const snapshot = rows.map((r) => ({ ...r, items: [...r.items] }));
+    return { tabs, tab: selectedTab, hero, rows: snapshot };
   }
 
-  const tmdb = await tmdbP;
-  if (tmdb.heroImage) hero.image = tmdb.heroImage;
-  // Give source rows the info-page fields Kino won't invent (ids.tmdb drives synopsis/rating/genres/cast;
-  // backdrop only counts if we provide it). One round-robin pass so every row shares the bounded budget.
-  const cols = rows.map((r) => r.items);
-  const flat = [];
-  const maxLen = cols.reduce((m, c) => Math.max(m, c.length), 0);
-  for (let i = 0; i < maxLen; i++) for (const c of cols) if (c[i]) flat.push(c[i]);
-  await enrichDetails(flat, 36);
-  // Ocultos del catálogo: fecha TMDB futura sin estrenar (__rel) o año futuro.
-  for (const r of rows) r.items = r.items.filter((x) => !futureYear(x.year) && !x.__rel);
-  const liveRows = rows.filter((r) => r.items.length);
-  // TMDB rows first: they always carry full details and resolve via the n79 id fast path.
-  liveRows.unshift(...tmdb.rows);
-
-  log(`[section] returned ${liveRows.length} rows for tab ${selectedTab}`);
-  return { tabs, tab: selectedTab, hero, rows: liveRows };
+  log(`[section] returned ${rows.length} rows for tab ${selectedTab}`);
+  return { tabs, tab: selectedTab, hero, rows };
 }
 
 export async function categories() {
