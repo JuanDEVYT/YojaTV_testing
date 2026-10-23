@@ -196,7 +196,7 @@ test('early-exit collector: the healthy server wins and vimeos never becomes pri
     assert.ok(out && out.url, 'resolve must return a stream');
     assert.ok(out.url.includes('fakecdn.example'), 'the healthy non-vimeos server wins');
     assert.ok(!out.url.includes('vimeos'), 'vimeos (player-403) must not win while another stream exists');
-    assert.ok(elapsed < 8000, 'must not wait for the hung server, took ' + elapsed + 'ms');
+    assert.ok(elapsed < 3000, 'must return the healthy embed quickly, took ' + elapsed + 'ms');
   } finally {
     globalThis.kino = real;
   }

@@ -146,7 +146,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '6.0.9';
+const PLUGIN_VERSION = '6.1.0';
 
 function log(...args) {
   try {
@@ -675,7 +675,7 @@ function lazyEmbedOf(path) {
  * se aprovecha y lo pendiente queda como copia perezosa ('untried') para
  * reintentarse solo si la persona la elige. `undefined` = no respondió a tiempo.
  */
-const HANG_GRACE_MS = 2500;
+const HANG_GRACE_MS = 700;
 async function settledWithGrace(jobs, graceMs = HANG_GRACE_MS) {
   const results = new Array(jobs.length).fill(undefined);
   let resolvedAny = false;
@@ -691,7 +691,7 @@ async function settledWithGrace(jobs, graceMs = HANG_GRACE_MS) {
     const started = Date.now();
     while (Date.now() - started < graceMs) {
       if (resolvedAny) {
-        await kino.sleep(250);
+        await kino.sleep(80);
         break;
       }
       await kino.sleep(80);
