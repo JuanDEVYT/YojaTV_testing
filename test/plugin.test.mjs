@@ -606,3 +606,87 @@ test('playerEvent answers null and just logs', async () => {
   const out = await plugin.playerEvent({ type: 'failed', kind: 'timeout' }, {});
   assert.equal(out, null, 'playerEvent is fire and forget');
 });
+
+/* ---------- 6.0.2 fixes: Cuevana domain, SoloLatino storage CSRF, CineHDPlus redirects ---------- */
+
+test('cuevana resolve targets cuevanaserie.pro', async () => {
+  const real = globalThis.kino;
+  const requested = [];
+  globalThis.kino = {
+    ...real,
+    fetch: async (url) => {
+      requested.push(url);
+      if (url.includes('ver.html')) {
+        return { ok: true, status: 200, url, text: () => 'player.src({ src: "https://cdn.example/video.m3u8" })' };
+      }
+      return { ok: false, status: 404, url, text: () => '' };
+    }
+  };
+  try {
+    const st = await plugin.resolve({ ref: 'cv:/peliculas/batman-test/' });
+    assert.ok(st && st.url === 'https://cdn.example/video.m3u8');
+    assert.ok(requested.some((u) => u.startsWith('https://cuevanaserie.pro/')), 'cuevana must fetch from cuevanaserie.pro');
+    assert.ok(!requested.some((u) => u.includes('cuevana-3.page')), 'cuevana-3.page should not be used');
+  } finally {
+    globalThis.kino = real;
+  }
+});
+
+test('sololatino persists csrf state in storage across runs', async () => {
+  const real = globalThis.kino;
+  let csrfFetches = 0;
+  globalThis.kino = {
+    ...real,
+    fetch: async (url) => {
+      if (url.includes('csrf-cookie')) {
+        csrfFetches++;
+        return { ok: true, status: 200, url, text: () => '' };
+      }
+      return { ok: true, status: 200, url, text: () => '<button class="btn-play" data-opt="t1">1</button>' };
+    }
+  };
+  try {
+    kino.storage.remove('sl_csrf_ok');
+    delete globalThis._slCsrfTs;
+    await plugin.resolve({ ref: 'sl:pelicula:test-peli' }).catch(() => null);
+    assert.equal(csrfFetches, 1, 'first resolve calls csrf-cookie');
+    assert.equal(kino.storage.get('sl_csrf_ok'), '1', 'storage holds csrf state');
+
+    // Simulate new runtime: globalThis variable lost, but storage preserved
+    delete globalThis._slCsrfTs;
+    await plugin.resolve({ ref: 'sl:pelicula:test-peli' }).catch(() => null);
+    assert.equal(csrfFetches, 1, 'second resolve reuses storage without extra csrf fetch');
+  } finally {
+    globalThis.kino = real;
+  }
+});
+
+test('cinehdplus handles window.location.replace redirects', async () => {
+  const real = globalThis.kino;
+  const urls = [];
+  globalThis.kino = {
+    ...real,
+    fetch: async (url) => {
+      urls.push(url);
+      if (url === 'https://cinehdplus.org/pelicula/batman/') {
+        return { ok: true, status: 200, url, text: () => '<iframe src="//api.cinehdplus.org/ir/player.php?h=abc"></iframe>' };
+      }
+      if (url.includes('player.php')) {
+        return { ok: true, status: 200, url, text: () => '<script>window.location.replace("goto.php?h=token123");</script>' };
+      }
+      if (url.includes('goto.php')) {
+        return { ok: true, status: 200, url, text: () => '<script>location.replace("https://api.cinehdplus.org/ir/rd.php?id=xyz");</script>' };
+      }
+      if (url.includes('rd.php')) {
+        return { ok: true, status: 200, url, text: () => '<iframe src="https://cdn.example/hls.m3u8"></iframe>' };
+      }
+      return { ok: false, status: 404, url, text: () => '' };
+    }
+  };
+  try {
+    const st = await plugin.resolve({ ref: 'chp:movie:https://cinehdplus.org/pelicula/batman/' });
+    assert.ok(st && st.url.includes('hls.m3u8'), 'cinehdplus follows location.replace chain to the stream');
+  } finally {
+    globalThis.kino = real;
+  }
+});
