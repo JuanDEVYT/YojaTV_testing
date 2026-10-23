@@ -740,8 +740,8 @@ test('live sources expose native TDT playlist and cached IPTV categories', async
   };
   try {
     const categories = await plugin.liveCategories();
-    assert.ok(categories.some((entry) => entry.playlist && entry.playlist.url.includes('tdtchannels.com')));
     assert.ok(categories.some((entry) => entry.id === 'iptv-mx'));
+    assert.ok(!categories.some((entry) => entry.playlist), 'native playlists must not leak external logos');
     const page = await plugin.liveChannels({ categoryId: 'iptv-mx', cursor: null });
     assert.equal(page.items[0].title, 'Canal Uno');
     assert.equal(page.items[0].categoryId, 'iptv-mx');

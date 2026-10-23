@@ -146,7 +146,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '6.0.6';
+const PLUGIN_VERSION = '6.0.7';
 
 function log(...args) {
   try {
@@ -198,8 +198,6 @@ function futureYear(y) {
 
 const DEFAULT_FETCH_TIMEOUT_MS = 7000;
 
-const TDT_PLAYLIST_URL = 'https://www.tdtchannels.com/lists/tv.m3u8';
-const TDT_EPG_URL = 'https://www.tdtchannels.com/epg/TV.xml.gz';
 const IPTV_CATALOG_URL = 'https://raw.githubusercontent.com/ice-dev-x/iptv_org_clean/refs/heads/main/catalogo.json';
 let _liveCatalogCache = null;
 let _liveCatalogCacheAt = 0;
@@ -3496,18 +3494,10 @@ export async function section(param) {
 
 export async function liveCategories() {
   const catalog = await liveCatalog();
-  return [
-    {
-      playlist: {
-        url: TDT_PLAYLIST_URL,
-        format: 'm3u',
-        epg: { url: TDT_EPG_URL, format: 'xmltv' },
-        refreshHours: 6,
-        hideGroups: ['Streaming', 'Autonómicos', 'Int. Europa', 'Int. Asia', 'Int. África']
-      }
-    },
-    ...catalog.map((category) => ({ id: category.id, title: category.title, genre: 'otros' }))
-  ];
+  // No expose the native TDT playlist: Kino preserves its embedded logos,
+  // including branding from unrelated plugins. The normalized catalog below
+  // deliberately omits external logos before channels reach Kino.
+  return catalog.map((category) => ({ id: category.id, title: category.title, genre: 'otros' }));
 }
 
 export async function liveChannels(arg) {
