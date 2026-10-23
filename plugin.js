@@ -24,6 +24,10 @@ function cleanText(s) {
   return undoubleUtf8(t).replace(/\s+/g, ' ').trim();
 }
 
+function isPluginBranding(text) {
+  return /(?:^|[\s|()[\]-])(?:kino|yojatv)(?:$|[\s|()[\]-])/i.test(String(text || ''));
+}
+
 // Some sources serve UTF-8 bytes as Latin-1 ("MÃ©xico"): join lead+continuation pairs back.
 function undoubleUtf8(s) {
   if (!/[\u00c2-\u00df][\u0080-\u00bf]/.test(s)) return s;
@@ -142,7 +146,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '6.0.5';
+const PLUGIN_VERSION = '6.0.6';
 
 function log(...args) {
   try {
@@ -215,13 +219,12 @@ async function liveCatalog() {
       for (const item of category.items) {
         const url = typeof item.ref === 'string' ? item.ref.trim() : '';
         const title = cleanText(item.title || '');
-        if (!title || !/^https?:\/\//i.test(url) || seen.has(url)) continue;
+        if (!title || isPluginBranding(title) || !/^https?:\/\//i.test(url) || seen.has(url)) continue;
         seen.add(url);
         items.push({
           id: sanitizeId(item.id || title, 'live'),
           title: title.slice(0, 160),
-          stream: { url },
-          ...(typeof item.logo === 'string' && /^https:\/\//i.test(item.logo) ? { logo: item.logo } : {})
+          stream: { url }
         });
         if (items.length >= 500) break;
       }

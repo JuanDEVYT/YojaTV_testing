@@ -728,7 +728,7 @@ test('live sources expose native TDT playlist and cached IPTV categories', async
   assert.ok(manifest.capabilities.includes('channels'), 'channels capability');
   assert.equal(manifest.liveStreamHosts, 'any');
   const real = globalThis.kino;
-  const catalog = [{ id: 'mx', title: 'México', items: [{ id: 'uno', title: 'Canal Uno', kind: 'live', ref: 'https://live.example/uno.m3u8' }] }];
+  const catalog = [{ id: 'mx', title: 'México', items: [{ id: 'uno', title: 'Canal Uno', kind: 'live', logo: 'https://example.com/tvplus-logo.png', ref: 'https://live.example/uno.m3u8' }] }];
   globalThis.kino = {
     ...real,
     fetch: async (url) => ({
@@ -745,6 +745,7 @@ test('live sources expose native TDT playlist and cached IPTV categories', async
     const page = await plugin.liveChannels({ categoryId: 'iptv-mx', cursor: null });
     assert.equal(page.items[0].title, 'Canal Uno');
     assert.equal(page.items[0].categoryId, 'iptv-mx');
+    assert.equal(page.items[0].logo, undefined, 'external plugin logos must not leak into YojaTV');
     const hits = await plugin.liveSearch({ query: 'uno' });
     assert.equal(hits.items[0].title, 'Canal Uno');
   } finally {
