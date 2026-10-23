@@ -142,7 +142,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '6.1.0';
+const PLUGIN_VERSION = '6.0.4';
 
 function log(...args) {
   try {
