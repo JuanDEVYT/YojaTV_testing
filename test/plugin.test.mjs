@@ -690,3 +690,36 @@ test('cinehdplus handles window.location.replace redirects', async () => {
     globalThis.kino = real;
   }
 });
+
+test('merged ref resolves fast with early exit and lazy alternatives', async () => {
+  const real = globalThis.kino;
+  const queried = [];
+  globalThis.kino = {
+    ...real,
+    fetch: async (url) => {
+      queried.push(url);
+      if (url.includes('ver.html')) {
+        return { ok: true, status: 200, url, text: () => 'player.src({ src: "https://fastcdn.example/play.m3u8" })' };
+      }
+      return { ok: false, status: 404, url, text: () => '' };
+    }
+  };
+  try {
+    const mgRef = 'mg:' + encodeURIComponent(JSON.stringify([
+      'cv:/peliculas/peli-rapida/',
+      'sl:pelicula:peli-rapida',
+      'hs:peliculas:peli-rapida',
+      'pgh:movie:peli-rapida'
+    ]));
+    const t0 = Date.now();
+    const st = await plugin.resolve({ ref: mgRef });
+    const elapsed = Date.now() - t0;
+    assert.ok(st && st.url.includes('fastcdn.example'), 'first available source stream is returned');
+    assert.ok(elapsed < 4000, 'resolve must exit early, took ' + elapsed + 'ms');
+    assert.ok(Array.isArray(st.alternatives), 'alternatives are provided');
+    assert.ok(st.alternatives.some((a) => a.ref && a.ref.startsWith('hs:')), 'untried sources become lazy alternatives');
+    assert.ok(st.alternatives.some((a) => a.ref && a.ref.startsWith('pgh:')), 'untried sources become lazy alternatives');
+  } finally {
+    globalThis.kino = real;
+  }
+});

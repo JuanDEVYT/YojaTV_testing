@@ -142,7 +142,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '6.0.2';
+const PLUGIN_VERSION = '6.0.3';
 
 function log(...args) {
   try {
@@ -507,7 +507,7 @@ async function probeStream(url, headers) {
   const isMp4 = /\.mp4(\?|$)/i.test(url);
   if (isMp4) h.Range = 'bytes=0-1';
   try {
-    const res = await kino.fetch(url, { method: 'GET', headers: h, cookies: false, timeoutMs: 8000 });
+    const res = await kino.fetch(url, { method: 'GET', headers: h, cookies: false, timeoutMs: 4000 });
     const ok = !!res && (res.ok || res.status === 206);
     if (!ok) {
       log(`[probe] descartado (${res && res.status ? res.status : 'err'}) <- ${url}`);
@@ -614,11 +614,27 @@ function lazyEmbedOf(path) {
 const HANG_GRACE_MS = 2500;
 async function settledWithGrace(jobs, graceMs = HANG_GRACE_MS) {
   const results = new Array(jobs.length).fill(undefined);
+  let resolvedAny = false;
   const all = Promise.all(jobs.map((j, i) => Promise.resolve(j).then(
-    (v) => { results[i] = v; },
+    (v) => {
+      results[i] = v;
+      if (v && (v.url || (v.st && v.st.url) || v === true)) resolvedAny = true;
+    },
     () => { results[i] = null; }
   )));
-  await Promise.race([all, kino.sleep(graceMs)]);
+
+  const earlyWatcher = async () => {
+    const started = Date.now();
+    while (Date.now() - started < graceMs) {
+      if (resolvedAny) {
+        await kino.sleep(250);
+        break;
+      }
+      await kino.sleep(80);
+    }
+  };
+
+  await Promise.race([all, earlyWatcher()]);
   return results;
 }
 
@@ -3030,7 +3046,13 @@ registerSource({
       try { st = await src.resolve(p); } catch { continue; }
       if (st && st.url) {
         log(`[tmdb] resolved "${title}" via ${c.srcId}`);
-        return st;
+        const alts = Array.isArray(st.alternatives) ? [...st.alternatives] : [];
+        for (const rem of cands.slice(tried)) {
+          if (alts.length >= 8) break;
+          const sName = (SOURCES[rem.srcId] && SOURCES[rem.srcId].label) || rem.srcId;
+          alts.push({ label: sName, ref: rem.ref });
+        }
+        return { ...st, ...(alts.length ? { alternatives: alts } : {}) };
       }
     }
     log(`[tmdb] no source resolved "${title}"`);
@@ -3684,26 +3706,51 @@ export async function resolve(params) {
       throw kino.error('not_found', 'Referencia fusionada inválida');
     }
     log(`[resolve] merged ref across ${refs.length} sources`);
-    const settled = await mapLimit(refs.slice(0, 8), 3, (r) => (FETCH_BUDGET <= 8 ? null : resolveOneRef(r)));
+
     const streams = [];
-    for (let i = 0; i < settled.length; i++) {
-      const s = settled[i];
-      if (s && s.url) {
-        const sid = refs[i].split(':')[0];
-        const name = (SOURCES[sid] && SOURCES[sid].label) || sid;
-        let q = null;
-        if (typeof s.label === 'string') {
-          const m = /^(\d{3,4}p)\b/.exec(s.label.trim());
-          if (m) q = m[1];
-        }
-        if (!q) q = qualityFromUrl(s.url);
-        streams.push({ ...s, label: srvLabel(q, name) || name });
+    const triedRefs = new Set();
+
+    async function tryBatch(batch) {
+      const promises = batch.map((r) => {
+        triedRefs.add(r);
+        return resolveOneRef(r).then((s) => {
+          if (s && s.url) {
+            const sid = r.split(':')[0];
+            const name = (SOURCES[sid] && SOURCES[sid].label) || sid;
+            let q = null;
+            if (typeof s.label === 'string') {
+              const m = /^(\d{3,4}p)\b/.exec(s.label.trim());
+              if (m) q = m[1];
+            }
+            if (!q) q = qualityFromUrl(s.url);
+            return { ...s, label: srvLabel(q, name) || name, srcId: sid, ref: r };
+          }
+          return null;
+        }, () => null);
+      });
+      const results = await Promise.all(promises);
+      for (const res of results) {
+        if (res && res.url) streams.push(res);
       }
     }
+
+    // Oleada 1: primeras 2 fuentes en paralelo. Si alguna responde sano, salimos de inmediato.
+    await tryBatch(refs.slice(0, 2));
+
+    // Si fallaron ambas, probar las siguientes 2
+    if (!streams.length && refs.length > 2) {
+      await tryBatch(refs.slice(2, 4));
+    }
+    // Si aún no hay stream y queda presupuesto, probar hasta 2 más
+    if (!streams.length && refs.length > 4 && FETCH_BUDGET > 10) {
+      await tryBatch(refs.slice(4, 6));
+    }
+
     if (!streams.length) {
       log('[resolve ERROR] no source resolved the merged ref');
       throw kino.error('unavailable', 'No se encontró un servidor de reproducción', { userMessage: 'Este título no se ha encontrado en YojaTV' });
     }
+
     const primary = streams[0];
     const alts = [];
     const seenAlt = new Set();
@@ -3714,7 +3761,13 @@ export async function resolve(params) {
       seenAlt.add(key);
       alts.push({ label: String(label || 'Servidor').slice(0, 48), ...entry });
     };
-    for (const s of streams.slice(1, 6)) pushAlt(s.label, { url: s.url, ...(s.headers ? { headers: s.headers } : {}) });
+
+    // 1. Streams ya resueltos en esta oleada rápida
+    for (const s of streams.slice(1)) {
+      pushAlt(s.label, { url: s.url, ...(s.headers ? { headers: s.headers } : {}) });
+    }
+
+    // 2. Alternativas que ya traía el primary (eager y lazy de su propio servidor)
     const pushInner = (s) => {
       for (const a of (Array.isArray(s.alternatives) ? s.alternatives : [])) {
         if (alts.length >= 8) return;
@@ -3724,9 +3777,24 @@ export async function resolve(params) {
       }
     };
     pushInner(primary);
-    for (const s of streams.slice(1, 6)) { if (alts.length >= 8) break; pushInner(s); }
-    log(`[resolve OK] merged resolved via ${streams.length} source(s): ${primary.url}`);
-    return { url: primary.url, label: primary.label, ...(primary.headers ? { headers: primary.headers } : {}), ...(alts.length ? { alternatives: alts } : {}) };
+    for (const s of streams.slice(1)) { if (alts.length >= 8) break; pushInner(s); }
+
+    // 3. El resto de fuentes NO probadas se ofrecen como copias perezosas (lazy refs)
+    for (const r of refs) {
+      if (alts.length >= 8) break;
+      if (triedRefs.has(r)) continue;
+      const sid = r.split(':')[0];
+      const name = (SOURCES[sid] && SOURCES[sid].label) || sid;
+      pushAlt(name, { ref: r });
+    }
+
+    log(`[resolve OK] merged resolved rápido via ${primary.srcId}: ${primary.url} (${alts.length} alts)`);
+    return {
+      url: primary.url,
+      label: primary.label,
+      ...(primary.headers ? { headers: primary.headers } : {}),
+      ...(alts.length ? { alternatives: alts } : {})
+    };
   }
 
   const sid = ref.includes(':') ? ref.split(':')[0] : (SOURCES[ref] ? ref : 'cv');
