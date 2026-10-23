@@ -1,7 +1,7 @@
 {
   "id": "yoja-tv-kino",
   "name": "YojaTV-alpha",
-  "version": "6.0.3",
+  "version": "6.1.0",
   "apiVersion": 9,
   "entry": "plugin.js",
   "description": "Plugin de YojaTV para Kino TV. Películas de cine en español latino, series y anime. Creado por JuandreXter, YojanderGaming y einer_bg.",
@@ -10,6 +10,7 @@
   "browser": "pages",
   "streamHosts": "any",
   "fetchHosts": "any",
+  "liveStreamHosts": "any",
   "color": "#FF6B00",
   "debug": true,
   "telemetry": "verbose",
@@ -142,6 +143,7 @@
     "browse",
     "episodes",
     "resolve",
+    "channels",
     "download",
     "migrate",
     "scopedSearch"
@@ -179,6 +181,9 @@
     "cdn.animeav1.com",
     "animeflv.or.at",
     "www.animeflv.or.at",
+    "www.tdtchannels.com",
+    "tdtchannels.com",
+    "raw.githubusercontent.com",
     "net79.cc",
     "www.net79.cc",
     "onlyflix.to",
@@ -300,6 +305,6 @@
   "icon": "icon.png",
   "signature": {
     "authorKey": "c3caf0f9e51197553082904a2655d51e5afcca579a3048cdfbd8a97f7b2cf2c3",
-    "value": "8a3efa1a889bec1b60fa6dc318bf6948c44a9bc1684a4bda4bd7983ca5e82e6c20abe6290ce451240a4509dff205a91ab8e9ff736b78e15a0337441af9601b02"
+    "value": "9ebd5b463cd39d678a6cbb1ea75c079371ec2afa6fabe7f41632840e23dadb36d3ad60f53977850d40bc8967968daf711d67b1fb95d84e5bae0a5c475ccd8d0e"
   }
 }

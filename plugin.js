@@ -142,7 +142,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '6.0.3';
+const PLUGIN_VERSION = '6.1.0';
 
 function log(...args) {
   try {
@@ -158,6 +158,24 @@ log(`Iniciando plugin YojaTV v${PLUGIN_VERSION} - Por JuandreXter, YojanderGamin
 // stops before the engine rejects everything else in the same call.
 let FETCH_BUDGET = 60;
 function fetchBudgetReset() { FETCH_BUDGET = 60; }
+
+const SOURCE_CACHE_TTL_MS = 5 * 60 * 1000;
+const _sourceSearchCache = new Map();
+const _sourceHomeCache = new Map();
+
+function sourceCacheGet(cache, key) {
+  const entry = cache.get(key);
+  if (!entry || Date.now() - entry.at > SOURCE_CACHE_TTL_MS) {
+    cache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function sourceCachePut(cache, key, value) {
+  cache.set(key, { at: Date.now(), value });
+  return value;
+}
 
 // Películas sin estreno (fecha TMDB futura): ocultas del catálogo porque ninguna
 // fuente las tiene. Los estrenos recientes SÍ se muestran (decisión del usuario:
@@ -175,6 +193,49 @@ function futureYear(y) {
 }
 
 const DEFAULT_FETCH_TIMEOUT_MS = 7000;
+
+const TDT_PLAYLIST_URL = 'https://www.tdtchannels.com/lists/tv.m3u8';
+const TDT_EPG_URL = 'https://www.tdtchannels.com/epg/TV.xml.gz';
+const IPTV_CATALOG_URL = 'https://raw.githubusercontent.com/ice-dev-x/iptv_org_clean/refs/heads/main/catalogo.json';
+let _liveCatalogCache = null;
+let _liveCatalogCacheAt = 0;
+
+async function liveCatalog() {
+  if (_liveCatalogCache && Date.now() - _liveCatalogCacheAt < 6 * 60 * 60 * 1000) return _liveCatalogCache;
+  try {
+    const data = await fetchJson(IPTV_CATALOG_URL);
+    if (!Array.isArray(data)) return _liveCatalogCache || [];
+    const categories = [];
+    for (const category of data.slice(0, 200)) {
+      if (!category || !Array.isArray(category.items)) continue;
+      const items = [];
+      const seen = new Set();
+      for (const item of category.items) {
+        const url = typeof item.ref === 'string' ? item.ref.trim() : '';
+        const title = cleanText(item.title || '');
+        if (!title || !/^https?:\/\//i.test(url) || seen.has(url)) continue;
+        seen.add(url);
+        items.push({
+          id: sanitizeId(item.id || title, 'live'),
+          title: title.slice(0, 160),
+          stream: { url },
+          ...(typeof item.logo === 'string' && /^https:\/\//i.test(item.logo) ? { logo: item.logo } : {})
+        });
+        if (items.length >= 500) break;
+      }
+      if (items.length) {
+        const id = sanitizeId(category.id || category.title, 'iptv');
+        categories.push({ id, title: cleanText(category.title || id).slice(0, 80), items });
+      }
+    }
+    _liveCatalogCache = categories;
+    _liveCatalogCacheAt = Date.now();
+    return categories;
+  } catch (e) {
+    log(`[live] catalog unavailable: ${e && e.message ? e.message : 'fetch error'}`);
+    return _liveCatalogCache || [];
+  }
+}
 
 async function fetchText(url, headers, timeoutMs) {
   if (FETCH_BUDGET <= 0) {
@@ -2330,15 +2391,23 @@ registerSource({
       }
       if (list.length > 0) return { episodes: list };
     }
-    // Fallback: probe embed endpoint for seasons 1-3 episodes 1-26
+    // Fallback: probe episode windows in parallel and stop at the first empty window.
     const list = [];
     for (let s = 1; s <= 3; s++) {
       let found = false;
-      for (let e = 1; e <= 26; e++) {
-        const ej = await fetchJson('https://net79.cc/api/embed-tmdb/' + tmdbId + '?type=tv&se=' + s + '&ep=' + e);
-        if (!ej || (!ej.url && !ej.mp4 && !(Array.isArray(ej) && ej.length > 0) && !ej.sources)) break;
-        list.push({ season: s, number: e, title: null, ref: 'n79:serie:' + tmdbId + ':' + s + ':' + e });
-        found = true;
+      for (let start = 1; start <= 26 && FETCH_BUDGET > 12; start += 6) {
+        const nums = Array.from({ length: Math.min(6, 27 - start) }, (_, i) => start + i);
+        const results = await mapLimit(nums, 6, async (e) => {
+          const ej = await fetchJson('https://net79.cc/api/embed-tmdb/' + tmdbId + '?type=tv&se=' + s + '&ep=' + e);
+          const valid = !!(ej && (ej.url || ej.mp4 || (Array.isArray(ej) && ej.length > 0) || ej.sources));
+          return valid ? e : null;
+        });
+        const valid = results.filter((e) => e !== null);
+        if (!valid.length) break;
+        for (const e of valid) {
+          list.push({ season: s, number: e, title: null, ref: 'n79:serie:' + tmdbId + ':' + s + ':' + e });
+          found = true;
+        }
       }
       if (!found) break;
     }
@@ -3104,11 +3173,23 @@ function raceDeadline(promise, ms, tag) {
 }
 
 async function safeSearch(src, q) {
-  try { return await src.search(q); } catch { return []; }
+  const key = src && src.id ? src.id + ':' + String(q || '').trim().toLowerCase() : '';
+  const cached = key ? sourceCacheGet(_sourceSearchCache, key) : null;
+  if (cached) return cached;
+  try {
+    const value = await src.search(q);
+    return key ? sourceCachePut(_sourceSearchCache, key, Array.isArray(value) ? value : []) : (Array.isArray(value) ? value : []);
+  } catch { return []; }
 }
 
 async function safeHome(src) {
-  try { return src.home ? await src.home() : []; } catch { return []; }
+  const key = src && src.id ? src.id : '';
+  const cached = key ? sourceCacheGet(_sourceHomeCache, key) : null;
+  if (cached) return cached;
+  try {
+    const value = src.home ? await src.home() : [];
+    return key ? sourceCachePut(_sourceHomeCache, key, Array.isArray(value) ? value : []) : (Array.isArray(value) ? value : []);
+  } catch { return []; }
 }
 
 function stripYearSuffix(s) {
@@ -3398,6 +3479,46 @@ export async function section(param) {
   return { tabs, tab: selectedTab, hero, rows };
 }
 
+export async function liveCategories() {
+  const catalog = await liveCatalog();
+  return [
+    {
+      playlist: {
+        url: TDT_PLAYLIST_URL,
+        format: 'm3u',
+        epg: { url: TDT_EPG_URL, format: 'xmltv' },
+        refreshHours: 6,
+        hideGroups: ['Streaming', 'Autonómicos', 'Int. Europa', 'Int. Asia', 'Int. África']
+      }
+    },
+    ...catalog.map((category) => ({ id: category.id, title: category.title, genre: 'otros' }))
+  ];
+}
+
+export async function liveChannels(arg) {
+  const catalog = await liveCatalog();
+  const categoryId = arg && typeof arg.categoryId === 'string' ? arg.categoryId : '';
+  const category = catalog.find((item) => item.id === categoryId);
+  if (!category) return { items: [], next: null };
+  const offset = Math.max(0, parseInt(arg && arg.cursor, 10) || 0);
+  const page = category.items.slice(offset, offset + 500).map((item) => ({ ...item, categoryId: category.id }));
+  return { items: page, next: offset + page.length < category.items.length ? String(offset + page.length) : null };
+}
+
+export async function liveSearch(arg) {
+  const query = String(arg && arg.query || '').trim().toLowerCase();
+  if (!query) return { items: [], next: null };
+  const catalog = await liveCatalog();
+  const items = [];
+  for (const category of catalog) {
+    for (const item of category.items) {
+      if (item.title.toLowerCase().includes(query)) items.push({ ...item, categoryId: category.id });
+      if (items.length >= 100) return { items, next: null };
+    }
+  }
+  return { items, next: null };
+}
+
 export async function categories() {
   await kino.sleep(0);
   fetchBudgetReset();
@@ -3429,6 +3550,10 @@ export async function action(key) {
   if (key === 'clearCache') {
     let n = 0;
     try { for (const k of kino.storage.keys()) if (k.indexOf('tmdb:') === 0) { kino.storage.remove(k); n++; } } catch {}
+    _sourceSearchCache.clear();
+    _sourceHomeCache.clear();
+    _liveCatalogCache = null;
+    _liveCatalogCacheAt = 0;
     log(`[action] clearCache removed ${n} tmdb entries`);
     return { message: 'Caché de TMDB limpia (' + n + ' entradas)' };
   }
@@ -3711,9 +3836,9 @@ export async function resolve(params) {
     const triedRefs = new Set();
 
     async function tryBatch(batch) {
-      const promises = batch.map((r) => {
+      const pending = batch.map((r, index) => {
         triedRefs.add(r);
-        return resolveOneRef(r).then((s) => {
+        const promise = resolveOneRef(r).then((s) => {
           if (s && s.url) {
             const sid = r.split(':')[0];
             const name = (SOURCES[sid] && SOURCES[sid].label) || sid;
@@ -3727,22 +3852,29 @@ export async function resolve(params) {
           }
           return null;
         }, () => null);
+        return { index, promise };
       });
-      const results = await Promise.all(promises);
-      for (const res of results) {
-        if (res && res.url) streams.push(res);
+      while (pending.length) {
+        const result = await Promise.race(pending.map((item) => item.promise.then((value) => ({ item, value }))));
+        const position = pending.indexOf(result.item);
+        if (position >= 0) pending.splice(position, 1);
+        if (result.value && result.value.url) {
+          streams.push(result.value);
+          return true;
+        }
       }
+      return false;
     }
 
     // Oleada 1: primeras 2 fuentes en paralelo. Si alguna responde sano, salimos de inmediato.
-    await tryBatch(refs.slice(0, 2));
+    let found = await tryBatch(refs.slice(0, 2));
 
     // Si fallaron ambas, probar las siguientes 2
-    if (!streams.length && refs.length > 2) {
-      await tryBatch(refs.slice(2, 4));
+    if (!found && refs.length > 2) {
+      found = await tryBatch(refs.slice(2, 4));
     }
     // Si aún no hay stream y queda presupuesto, probar hasta 2 más
-    if (!streams.length && refs.length > 4 && FETCH_BUDGET > 10) {
+    if (!found && refs.length > 4 && FETCH_BUDGET > 10) {
       await tryBatch(refs.slice(4, 6));
     }
 

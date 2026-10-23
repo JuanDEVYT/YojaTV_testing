@@ -723,3 +723,31 @@ test('merged ref resolves fast with early exit and lazy alternatives', async () 
     globalThis.kino = real;
   }
 });
+
+test('live sources expose native TDT playlist and cached IPTV categories', async () => {
+  assert.ok(manifest.capabilities.includes('channels'), 'channels capability');
+  assert.equal(manifest.liveStreamHosts, 'any');
+  const real = globalThis.kino;
+  const catalog = [{ id: 'mx', title: 'México', items: [{ id: 'uno', title: 'Canal Uno', kind: 'live', ref: 'https://live.example/uno.m3u8' }] }];
+  globalThis.kino = {
+    ...real,
+    fetch: async (url) => ({
+      ok: true,
+      status: 200,
+      url,
+      text: () => JSON.stringify(catalog)
+    })
+  };
+  try {
+    const categories = await plugin.liveCategories();
+    assert.ok(categories.some((entry) => entry.playlist && entry.playlist.url.includes('tdtchannels.com')));
+    assert.ok(categories.some((entry) => entry.id === 'iptv-mx'));
+    const page = await plugin.liveChannels({ categoryId: 'iptv-mx', cursor: null });
+    assert.equal(page.items[0].title, 'Canal Uno');
+    assert.equal(page.items[0].categoryId, 'iptv-mx');
+    const hits = await plugin.liveSearch({ query: 'uno' });
+    assert.equal(hits.items[0].title, 'Canal Uno');
+  } finally {
+    globalThis.kino = real;
+  }
+});
