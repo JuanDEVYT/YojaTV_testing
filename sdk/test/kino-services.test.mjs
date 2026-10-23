@@ -50,7 +50,7 @@ test("contract: kino.meta and kino.tmdb are additive (no new apiVersion) and pin
   // apiVersion 9 (Kino 0.9.55) brought kino.meta by title among others; kino.meta and kino.tmdb themselves add none.
   assert.equal(contract.apiVersion, 11);
   assert.deepEqual(contract.apiVersionFromApp, { "6": "0.9.50", "7": "0.9.51", "8": "0.9.54", "9": "0.9.55", "10": "0.9.65", "11": "0.9.66" });
-  assert.deepEqual(contract.additiveFromApp, { "kino.meta": "0.9.53", "kino.tmdb": "0.9.53", catalogOnly: "0.9.54", "kino.browser.captureAll": "0.9.54", "fetch.errorHost": "0.9.55", "kino.fetchAnyHost": "0.9.55", "kino.meta.byTitle": "0.9.55", "kino.device": "0.9.55", "kino.seed": "0.9.55" });
+  assert.deepEqual(contract.additiveFromApp, { "kino.meta": "0.9.53", "kino.tmdb": "0.9.53", catalogOnly: "0.9.54", "kino.browser.captureAll": "0.9.54", "fetch.errorHost": "0.9.55", "kino.fetchAnyHost": "0.9.55", "kino.meta.byTitle": "0.9.55", "kino.device": "0.9.55", "kino.seed": "0.9.55", "panel.loading": "0.9.64", "kino.nuvio": "0.9.71" });
   assert.deepEqual(contract.kinoMeta.idKeys, ["imdb", "tmdb", "tvdb", "kitsu", "mal", "anilist"]);
   assert.equal(contract.kinoMeta.perMinute, 30);
   assert.equal(contract.kinoTmdb.perWindow, 40);
@@ -60,8 +60,8 @@ test("contract: kino.meta and kino.tmdb are additive (no new apiVersion) and pin
   assert.deepEqual(contract.kinoTmdb.personKeyOn, [401, 403, 429, "kinoKeyLimit"]);
   assert.equal(contract.kinoTmdb.windowMs, 10000);
   assert.ok(contract.kinoTmdb.errorCodes.includes("no_tmdb_key"));
-  assert.equal(contract.kinoTmdb.noKeyUserMessage.es, "Agrega tu llave de TMDB en Ajustes ▸ Tu llave de TMDB");
-  assert.equal(contract.kinoTmdb.noKeyUserMessage.en, "Add your TMDB key in Settings ▸ Your TMDB key");
+  assert.equal(contract.kinoTmdb.noKeyUserMessage.es, "Agrega tu llave de TMDB en Ajustes de todos los perfiles ▸ Llaves");
+  assert.equal(contract.kinoTmdb.noKeyUserMessage.en, "Add your TMDB key in Settings for all profiles ▸ Keys");
 });
 
 test("kino.meta: the query is checked like the app does", () => {

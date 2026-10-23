@@ -24,8 +24,8 @@ function freshCatalogCall() {
 
 const plugin = await import('../plugin.js');
 
-test('manifest is apiVersion 9 with browser pages', () => {
-  assert.equal(manifest.apiVersion, 9);
+test('manifest is apiVersion 11 with browser pages', () => {
+  assert.equal(manifest.apiVersion, 11);
   assert.equal(manifest.browser, 'pages');
   assert.ok(Array.isArray(manifest.hosts) && manifest.hosts.length > 20);
   assert.equal(manifest.streamHosts, 'any');
@@ -37,8 +37,10 @@ test('manifest is apiVersion 9 with browser pages', () => {
   assert.equal(manifest.section.label, 'YojaTV');
   assert.ok(manifest.panel && manifest.panel.iconFile, 'manifest must declare the player panel');
   assert.ok(Array.isArray(manifest.capabilities) && manifest.capabilities.includes('migrate'), 'migrate capability');
+  assert.ok(!manifest.capabilities.includes('nuvio'), 'nuvio stays disabled');
+  assert.ok(!manifest.capabilities.includes('externalResolve'), 'external resolve stays disabled');
   assert.ok(Array.isArray(manifest.settingsLayout) && manifest.settingsLayout.some((s) => s.type === 'card'), 'settingsLayout cards');
-  assert.deepEqual(manifest.categories, ['movies', 'series', 'anime']);
+  assert.deepEqual(manifest.categories, ['movies', 'series', 'anime', 'live']);
 });
 
 test('categories export returns categories array', async () => {
@@ -571,6 +573,8 @@ test('panel draws status, transport, step and the series episodes', { skip: !has
   assert.ok(row && row.children.length === 3, 'the transport row has three buttons');
   const sel = p.elements.find((el) => el.type === 'select');
   assert.ok(sel && sel.key === 'step' && sel.options.length === 3, 'the step select is there');
+  assert.ok(p.elements.some((el) => el.type === 'toggle' && el.key === 'autoNext'), 'auto-next toggle is there');
+  assert.ok(p.elements.some((el) => el.type === 'select' && el.key === 'resize'), 'resize select is there');
   assert.equal(p.elements.filter((el) => !el.type || typeof el.type !== 'string').length, 0, 'every element has a type');
 
   // Una vez vistas las episodios de una serie, el panel de un episodio la lista.
@@ -596,6 +600,10 @@ test('panelAction seeks with the step, cycles the speed and applies the step sel
   assert.equal(sp.player.speed, 1.25, 'the speed cycles forward');
   const step = await plugin.panelAction({ key: 'step', trigger: 'change', values: {}, value: '30' }, ctx);
   assert.equal(step.player.seekStepMs, 30000, 'the select applies the step in ms');
+  const next = await plugin.panelAction({ key: 'autoNext', trigger: 'change', values: {}, value: true }, ctx);
+  assert.deepEqual(next.player.autoNext, { enabled: true, countdownS: 8 });
+  const resize = await plugin.panelAction({ key: 'resize', trigger: 'change', values: {}, value: 'fill' }, ctx);
+  assert.equal(resize.player.resize, 'fill');
   const junk = await plugin.panelAction({ key: 'speed', trigger: 'press', values: {} }, { ...ctx, positionMs: 0 });
   assert.equal(junk.player.seekToMs, undefined, 'unknown combinations answer nothing extra');
   const none = await plugin.panelAction({ key: 'otra', trigger: 'press', values: {} }, ctx);
@@ -605,6 +613,33 @@ test('panelAction seeks with the step, cycles the speed and applies the step sel
 test('playerEvent answers null and just logs', async () => {
   const out = await plugin.playerEvent({ type: 'failed', kind: 'timeout' }, {});
   assert.equal(out, null, 'playerEvent is fire and forget');
+});
+
+test('details uses Kino metadata by TMDB id', async () => {
+  const real = globalThis.kino;
+  globalThis.kino = {
+    ...real,
+    meta: async (query) => ({ title: 'Matrix', overview: 'Resumen', poster: 'https://img.example/m.jpg', ids: query.ids, genres: ['Acción'], rating: 8.7, sources: ['tmdb'] })
+  };
+  try {
+    const answer = await plugin.details('tmdb:movie:603:Matrix');
+    assert.equal(answer.title, 'Matrix');
+    assert.equal(answer.ids.tmdb, 603);
+    assert.equal(answer.rating, 8.7);
+  } finally { globalThis.kino = real; }
+});
+
+test('details uses byTitle when a source has no id', async () => {
+  const real = globalThis.kino;
+  const queries = [];
+  const meta = async (query) => { queries.push(query); return { title: query.title, year: '1999', ids: { tmdb: 603 }, sources: ['tmdb'] }; };
+  meta.byTitle = true;
+  globalThis.kino = { ...real, meta };
+  try {
+    const answer = await plugin.details('cc:movie:matrix');
+    assert.equal(answer.ids.tmdb, 603);
+    assert.equal(queries[0].title, 'Matrix');
+  } finally { globalThis.kino = real; }
 });
 
 /* ---------- 6.0.2 fixes: Cuevana domain, SoloLatino storage CSRF, CineHDPlus redirects ---------- */

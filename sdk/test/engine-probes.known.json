@@ -11,5 +11,6 @@
   "large: recursion depth 5000": "The app's stack is 1 MB (PluginEnv.maxStackBytes): 5000 nested calls already throw InternalError. The kit gives V8's ~10000 frames.",
   "large: recursion depth 50000": "Both engines throw, with a different name: InternalError in the app, RangeError in the kit.",
   "large: object with 1e6 keys": "Memory limit of 64 MB in the app (PluginEnv.memoryLimitBytes); an object with 1e6 keys throws InternalError there. The kit has no such limit.",
-  "large: Map with 1e6 entries": "Memory limit of 64 MB in the app (PluginEnv.memoryLimitBytes); a Map with 1e6 entries fails there (the error has no name). The kit has no such limit."
+  "large: Map with 1e6 entries": "Memory limit of 64 MB in the app (PluginEnv.memoryLimitBytes); a Map with 1e6 entries fails there (the error has no name). The kit has no such limit.",
+  "regexp backtracking guard": "The app's engine interrupts catastrophic regular-expression backtracking; the kit's V8 regexp engine does not. Avoid nested ambiguous quantifiers and untrusted regular expressions."
 }

@@ -146,7 +146,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '6.0.7';
+const PLUGIN_VERSION = '6.0.8';
 
 function log(...args) {
   try {
@@ -2942,6 +2942,33 @@ async function tmdbEnrich(items, query) {
 /** Title → TMDB hit cache (per session) so reopening a section doesn't re-query the same titles. */
 const TMDB_LOOKUP = new Map();
 
+async function kinoMetaFor(item) {
+  if (typeof kino.meta !== 'function' || !item || !item.title) return null;
+  const type = item.kind === 'series' ? 'series' : 'movie';
+  const ids = {};
+  if (item.ids && Number.isInteger(Number(item.ids.tmdb)) && Number(item.ids.tmdb) > 0) ids.tmdb = Number(item.ids.tmdb);
+  if (item.ids && typeof item.ids.imdb === 'string' && /^tt\d{5,10}$/.test(item.ids.imdb)) ids.imdb = item.ids.imdb;
+  try {
+    if (Object.keys(ids).length) return await kino.meta({ type, ids, lang: tmdbLang() });
+    if (kino.meta.byTitle === true) return await kino.meta({ type, title: tmdbQueryTitle(item.title).slice(0, 200), ...(item.year ? { year: String(item.year).slice(0, 4) } : {}), lang: tmdbLang() });
+  } catch (e) {
+    log(`[meta] ${item.title}: ${e && e.code ? e.code : 'unavailable'}`);
+  }
+  return null;
+}
+
+function applyMeta(item, hit) {
+  if (!item || !hit) return;
+  if (hit.ids) item.ids = { ...(item.ids || {}), ...(hit.ids || {}) };
+  if (!item.poster && hit.poster) item.poster = hit.poster;
+  if (!item.backdrop && hit.backdrop) item.backdrop = hit.backdrop;
+  if (!item.overview && hit.overview) item.overview = String(hit.overview).slice(0, 2000);
+  if (!item.year && hit.year) item.year = hit.year;
+  if (!item.rating && typeof hit.rating === 'number') item.rating = hit.rating;
+  if (!item.genres && Array.isArray(hit.genres)) item.genres = hit.genres.slice(0, 5);
+  if (!item.runtimeMinutes && hit.runtimeMinutes) item.runtimeMinutes = Number(hit.runtimeMinutes);
+}
+
 /**
  * Fill in info-page fields Kino won't invent: ids.tmdb (drives synopsis/genres/rating/cast enrichment) and
  * backdrop (only your answer counts). One TMDB search per missing title, bounded and cached. Never throws.
@@ -2954,6 +2981,14 @@ async function enrichDetails(items, cap = 36) {
     if (FETCH_BUDGET <= 5) return;
     const norm = tmdbNormTitle(tmdbQueryTitle(it.title));
     if (!norm) return;
+    const kinoHit = await kinoMetaFor(it);
+    if (kinoHit) {
+      applyMeta(it, kinoHit);
+      if (it.ids && it.ids.tmdb) {
+        TMDB_LOOKUP.set(norm, { id: it.ids.tmdb, backdrop_path: it.backdrop || null, poster_path: it.poster || null, overview: it.overview || '', vote_average: it.rating || 0, date: it.year || '' });
+        return;
+      }
+    }
     let hit = TMDB_LOOKUP.get(norm);
     if (hit === undefined) {
       if (budget <= 0) return;
@@ -3492,6 +3527,37 @@ export async function section(param) {
   return { tabs, tab: selectedTab, hero, rows };
 }
 
+export async function details(ref) {
+  const raw = typeof ref === 'string' ? ref : '';
+  if (!raw) return null;
+  let item = null;
+  if (raw.startsWith('tmdb:')) {
+    const parsed = tmdbSplit(raw.slice(5));
+    item = { title: parsed.title, kind: parsed.kind === 'series' ? 'series' : 'movie', ids: parsed.id ? { tmdb: Number(parsed.id) } : {} };
+  } else {
+    const sid = raw.split(':')[0];
+    const source = SOURCES[sid];
+    if (source && source.id !== 'tmdb') {
+      const path = raw.slice(sid.length + 1);
+      const title = slugToTitle(path.split(':').pop().split('/').filter(Boolean)[0]);
+      item = { title, kind: source.kind === 'series' || source.kind === 'anime' ? 'series' : 'movie', ids: {} };
+    }
+  }
+  if (!item || !item.title) return null;
+  const hit = await kinoMetaFor(item);
+  if (!hit) return null;
+  return {
+    title: hit.title || item.title,
+    ...(hit.poster ? { poster: hit.poster } : {}),
+    ...(hit.backdrop ? { backdrop: hit.backdrop } : {}),
+    ...(hit.overview ? { overview: hit.overview } : {}),
+    ...(hit.genres ? { genres: hit.genres.slice(0, 5) } : {}),
+    ...(hit.year ? { year: hit.year } : {}),
+    ...(typeof hit.rating === 'number' ? { rating: hit.rating } : {}),
+    ...(hit.ids ? { ids: hit.ids } : {})
+  };
+}
+
 export async function liveCategories() {
   const catalog = await liveCatalog();
   // No expose the native TDT playlist: Kino preserves its embedded logos,
@@ -4018,6 +4084,21 @@ export async function panel(context) {
   });
 
   elements.push({
+    type: 'toggle', key: 'autoNext', label: 'Siguiente episodio', labelEn: 'Next episode',
+    scope: 'plugin', autoSave: true, hint: 'Reproducir el siguiente episodio automáticamente', hintEn: 'Play the next episode automatically'
+  });
+  elements.push({
+    type: 'select', key: 'resize', label: 'Tamaño', labelEn: 'Resize', scope: 'plugin', autoSave: true,
+    options: [
+      { value: 'fit', label: 'Ajustar', labelEn: 'Fit' },
+      { value: 'fill', label: 'Rellenar', labelEn: 'Fill' },
+      { value: 'zoom', label: 'Zoom' },
+      { value: '16:9', label: '16:9' },
+      { value: '21:9', label: '21:9' }
+    ]
+  });
+
+  elements.push({
     type: 'select', key: 'step', label: 'Paso', labelEn: 'Step', scope: 'plugin', autoSave: true,
     hint: 'Paso de Atrás y Adelante', hintEn: 'Back and Forward step',
     options: [
@@ -4053,6 +4134,14 @@ export async function panelAction(event, context) {
     const n = parseInt(String(e.value), 10);
     if (n >= 5 && n <= 120) return { player: { seekStepMs: n * 1000 } };
     return null;
+  }
+  if (e.trigger === 'change' && e.key === 'autoNext') {
+    const enabled = e.value === true || e.value === 'true';
+    return { player: { autoNext: enabled ? { enabled: true, countdownS: 8 } : { enabled: false } } };
+  }
+  if (e.trigger === 'change' && e.key === 'resize') {
+    const value = String(e.value || 'fit');
+    if (['fit', 'fill', 'zoom', '16:9', '21:9'].includes(value)) return { player: { resize: value } };
   }
   return null;
 }

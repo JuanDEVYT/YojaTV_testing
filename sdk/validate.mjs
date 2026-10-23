@@ -55,6 +55,8 @@ export function consentLines(m, { authorFingerprint = null } = {}) {
   if (m.capabilities.includes("channels")) line("Agrega canales en vivo a la pestaña En vivo");
   if (m.capabilities.includes("migrate")) line("Revisar lo que tienes guardado (biblioteca, historial, favoritos) para pasarlo a este plugin");
   if (m.capabilities.includes("subtitles")) line("Agrega subtítulos a tus películas y series");
+  // Experiment: the plugin may ask the Nuvio scrapers the person already installed (contract.json kinoNuvio.consentLine).
+  if (m.capabilities.includes(contract.kinoNuvio.capability)) line(contract.kinoNuvio.consentLine.es);
   // apiVersion 7 "tracking": in red, the plugin's declared hosts named (PluginConsent / Tracking.consentLine).
   if (m.capabilities.includes(contract.tracking.capability)) line(trackingConsentLine(m.hosts || []), true);
   // apiVersion 7 "segments": a plain line, not red (it only learns which title plays): PluginConsent / Segments.CONSENT_LINE.
@@ -217,6 +219,10 @@ export function unguardedServiceNotes(source) {
     if (calls && !guarded) {
       notes.push(`kino.${name} existe desde Kino ${contract.additiveFromApp["kino." + name]}: comprueba typeof kino.${name} === "function" antes de usarlo, o el plugin falla en versiones anteriores`);
     }
+  }
+  // Kino 0.9.71 (apiVersion 11): kino.nuvio is an object, absent on an older Kino (which refuses apiVersion 11 anyway).
+  if (/\bkino\s*\.\s*nuvio\s*\.\s*\w+\s*\(/.test(source) && !/typeof\s+kino\s*\.\s*nuvio\b/.test(source)) {
+    notes.push(`kino.nuvio existe desde Kino ${contract.additiveFromApp["kino.nuvio"]}: comprueba typeof kino.nuvio === "object" antes de usarlo`);
   }
   // Kino 0.9.55: kino.meta({ type, title }) — an older Kino answers invalid_request (no ids).
   const byTitle = /\bkino\s*\.\s*meta\s*\(\s*\{[^}]*\btitle\s*[:,}]/.test(source);

@@ -38,8 +38,8 @@ test("contract.json is the one the app pins", () => {
   assert.equal(contract.apiVersion, 11);
   // apiVersion 5 stays what Kino 0.9.45 made it: the author-signed entry, nothing else.
   assert.equal(contract.manifest.signature.apiVersion, 5);
-  assert.deepEqual(contract.capabilities.names, ["search", "home", "browse", "episodes", "resolve", "download", "drm", "channels", "migrate", "scopedSearch", "meta", "subtitles", "tracking", "segments", "playlists", "externalResolve"]);
-  assert.deepEqual(contract.capabilities.declarative, ["download", "drm", "scopedSearch", "externalResolve"]);
+  assert.deepEqual(contract.capabilities.names, ["search", "home", "browse", "episodes", "resolve", "download", "drm", "channels", "migrate", "scopedSearch", "meta", "subtitles", "tracking", "segments", "playlists", "externalResolve", "nuvio"]);
+  assert.deepEqual(contract.capabilities.declarative, ["download", "drm", "scopedSearch", "externalResolve", "nuvio"]);
   assert.deepEqual(contract.permissions, []);
 });
 
@@ -1432,7 +1432,7 @@ test("secrets: parsed with apiVersion 4, ignored below it, and its Spanish messa
 });
 
 test("migrate: a consent line, and an update that adds it re-asks like any new reach", () => {
-  assert.deepEqual(contract.capabilities.needsApproval, ["download", "drm", "channels", "migrate", "tracking"]);
+  assert.deepEqual(contract.capabilities.needsApproval, ["download", "drm", "channels", "migrate", "tracking", "nuvio"]);
   assert.deepEqual(consentLines(validateManifest(manifest({ apiVersion: 6, capabilities: ["search", "resolve", "migrate"] })).manifest),
     [{ text: "Revisar lo que tienes guardado (biblioteca, historial, favoritos) para pasarlo a este plugin", danger: false }]);
 });

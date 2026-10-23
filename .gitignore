@@ -6,6 +6,9 @@ sdk/config.json
 node_modules/
 scratch/
 temp_template/
+YojaTV_logo_big.png
+YojaTV_logo_small.png
+artwork.mjs
 test/fixtures.json
 media/
 

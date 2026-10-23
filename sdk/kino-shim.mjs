@@ -763,6 +763,11 @@ function deviceFor(device, env) {
  * exchanges, so a test can run offline and give the same answers every time. [fetchImpl]: the
  * network itself (tests point it at a local server).
  *
+ * kino.nuvio (Kino 0.9.71, apiVersion 11): [nuvioFixture] (an object, or a file path; default env KINO_NUVIO_FIXTURE) stands in for the
+ * Nuvio repositories the manifest names: `{ "owner/repo": { available: [{ id, name, description?, types?, languages?, compatible? }],
+ * streams: { "<scraper id>": { "movie:603": { url, mime?, headers?, label?, subtitles?, alternatives? }, "series:1399:1:1": {...},
+ * "series:1399": {...}, "movie:1": { error: { code, message } }, "movie:2": { url, delayMs: 90000 } } } } }`. Without it, kino.nuvio throws
+ * `unavailable`: the kit has no scrapers of its own.
  * kino.meta / kino.tmdb (Kino 0.9.53): [metaFixture] (an object, or a file path; default env KINO_META_FIXTURE) answers
  * kino.meta offline -- keys `"<type>:<idKey>:<value>"` or `"<idKey>:<value>"` (`"movie:imdb:tt0133093"`, `"tmdb:603"`), and
  * for a lookup by title (Kino 0.9.55) `"<type>:title:<normalised title>:<year>"` or without the year (`"movie:title:the matrix:1999"`) --
@@ -774,7 +779,7 @@ function deviceFor(device, env) {
  * kino.device (Kino 0.9.55, contract.kinoDevice): [device] ("phone" or "tv", run.mjs --device), else env KINO_DEVICE,
  * else "phone". Anything else throws: a typo must not silently test the other UI.
  */
-export function createKino(manifest, { appVersion = "sdk", lang = "es-CO", device = undefined, storageFile = null, cookiesFile = null, secretsFile = null, config = {}, record = null, replay = null, fetchImpl = globalThis.fetch, metaFixture = undefined, tmdbKey = undefined, tmdbFixture = undefined, env = process.env, now = Date.now } = {}) {
+export function createKino(manifest, { appVersion = "sdk", lang = "es-CO", device = undefined, storageFile = null, cookiesFile = null, secretsFile = null, config = {}, record = null, replay = null, fetchImpl = globalThis.fetch, metaFixture = undefined, tmdbKey = undefined, tmdbFixture = undefined, nuvioFixture = undefined, env = process.env, now = Date.now } = {}) {
   const f = contract.fetch;
   const kinoDevice = deviceFor(device, env);
   const storage = loadJson(storageFile, {});
@@ -1255,6 +1260,99 @@ export function createKino(manifest, { appVersion = "sdk", lang = "es-CO", devic
     ...(contract.apiVersion >= KP.apiVersion ? keyPairApi({ pluginSecrets, buf }) : {}),
   });
 
+  // --- kino.nuvio (Kino 0.9.71, apiVersion 11, capability "nuvio"): the app installs and asks the scrapers of the Nuvio
+  // repositories the manifest names (nuvioRepos). The kit has no scrapers: it answers from a fixture (KINO_NUVIO_FIXTURE),
+  // with the app's checks, limits and codes, so the plugin's own logic -- which scrapers, in what order, how the copies
+  // merge -- runs offline. ---
+  const N = contract.kinoNuvio;
+  const nuvioBucket = tokenBucket(N.perMinute, 60_000, now);
+  const nuvioFixtureFile = nuvioFixture === undefined ? env.KINO_NUVIO_FIXTURE : nuvioFixture;
+  const nuvioRepoAnswers = typeof nuvioFixtureFile === "string" && nuvioFixtureFile ? readJsonFile(nuvioFixtureFile, "KINO_NUVIO_FIXTURE") : plainObject(nuvioFixtureFile) ? nuvioFixtureFile : null;
+  const nuvioInstalled = new Map(); // repository -> Map(scraper id -> { id, name }) in install order
+  const repoKey = (r) => String(r).trim().toLowerCase();
+  const nuvioScraperList = (q) => {
+    if (q.scrapers === undefined) return undefined;
+    if (!Array.isArray(q.scrapers) || q.scrapers.length > N.maxScraperFilter || !q.scrapers.every((s) => typeof s === "string" && s)) {
+      throw kinoError("invalid_request", `kino.nuvio: "scrapers" is a list of at most ${N.maxScraperFilter} scraper ids`);
+    }
+    return q.scrapers;
+  };
+  async function nuvioRepo(query) {
+    await null;
+    if (!plainObject(query) || typeof query.repo !== "string" || !query.repo.trim()) throw kinoError("invalid_request", 'kino.nuvio: the query needs a "repo" (owner/repo or the https address of a Nuvio manifest)');
+    if (JSON.stringify(query).length > N.maxRequestChars) throw kinoError("invalid_request", `kino.nuvio: the query is longer than ${N.maxRequestChars} characters`);
+    const declared = Array.isArray(manifest.nuvioRepos) ? manifest.nuvioRepos.map(repoKey) : [];
+    if (!manifest.capabilities.includes(N.capability) || !declared.includes(repoKey(query.repo))) {
+      throw kinoError("not_allowed", `kino.nuvio: this plugin does not declare the "${N.capability}" capability with "${query.repo.slice(0, 80)}" in "${N.manifestField}"`);
+    }
+    if (!nuvioBucket.take()) throw kinoError("rate_limited", `too many kino.nuvio calls in a minute (at most ${N.perMinute}); wait a moment`);
+    const key = Object.keys(nuvioRepoAnswers || {}).find((k) => repoKey(k) === repoKey(query.repo));
+    if (!key) throw kinoError("unavailable", `the Node kit has no Nuvio repository to read: give it a fixture with KINO_NUVIO_FIXTURE (a repository "${query.repo.slice(0, 80)}" with its scrapers and their answers); the real scrapers only run in the app`);
+    const repo = nuvioRepoAnswers[key];
+    const offered = (Array.isArray(repo.available) ? repo.available : []).filter((o) => plainObject(o) && typeof o.id === "string" && o.id).slice(0, N.maxOffered);
+    if (!nuvioInstalled.has(repoKey(query.repo))) nuvioInstalled.set(repoKey(query.repo), new Map());
+    return { repo, offered, installed: nuvioInstalled.get(repoKey(query.repo)) };
+  }
+  const nuvioApi = Object.freeze({
+    async available(query) {
+      const { offered, installed } = await nuvioRepo(query);
+      return offered.map((o) => ({
+        id: o.id, name: String(o.name || o.id), description: String(o.description || "").slice(0, 120),
+        types: Array.isArray(o.types) ? o.types.map(String) : [], languages: Array.isArray(o.languages) ? o.languages.map(String) : [],
+        compatible: o.compatible !== false, installed: installed.has(o.id),
+      }));
+    },
+    async use(query) {
+      const { offered, installed } = await nuvioRepo(query);
+      if (!Array.isArray(query.scrapers) || !query.scrapers.length || query.scrapers.length > N.maxUse || !query.scrapers.every((s) => typeof s === "string" && s)) {
+        throw kinoError("invalid_request", `kino.nuvio.use needs "scrapers": 1 to ${N.maxUse} scraper ids`);
+      }
+      const ready = [];
+      const failed = [];
+      for (const id of query.scrapers) {
+        const o = offered.find((x) => x.id === id);
+        if (!o) failed.push({ id, code: "not_found", message: "the repository offers no such scraper" });
+        else if (o.compatible === false) failed.push({ id, code: "refused", message: "Kino does not use this scraper (it needs torrents)" });
+        else { if (!installed.has(id)) installed.set(id, { id, name: String(o.name || id) }); ready.push(id); }
+      }
+      return { ready, failed };
+    },
+    async scrapers(query) {
+      const { installed } = await nuvioRepo(query);
+      const only = nuvioScraperList(query);
+      return [...installed.values()].filter((s) => !only || only.includes(s.id)).map((s) => ({ id: s.id, name: s.name }));
+    },
+    async streams(query) {
+      const { repo, installed } = await nuvioRepo(query);
+      const only = nuvioScraperList(query);
+      if (!["movie", "series", "tv"].includes(query.type)) throw kinoError("invalid_request", 'kino.nuvio.streams: "type" is "movie", "series" or "tv"');
+      if (!Number.isInteger(query.tmdbId) || query.tmdbId < 1) throw kinoError("invalid_request", 'kino.nuvio.streams: "tmdbId" is the title\'s TMDB id (a positive integer)');
+      const isSeries = query.type !== "movie";
+      if (isSeries && (!Number.isInteger(query.season) || query.season < 0 || !Number.isInteger(query.episode) || query.episode < 1)) {
+        throw kinoError("invalid_request", 'kino.nuvio.streams: a series needs "season" and "episode"');
+      }
+      const timeoutMs = query.timeoutMs === undefined ? N.scraperTimeoutMs : query.timeoutMs;
+      if (!Number.isInteger(timeoutMs) || timeoutMs < N.minScraperTimeoutMs || timeoutMs > N.scraperTimeoutMs) {
+        throw kinoError("invalid_request", `kino.nuvio.streams: "timeoutMs" is ${N.minScraperTimeoutMs} to ${N.scraperTimeoutMs}`);
+      }
+      const asked = [...installed.values()].filter((s) => !only || only.includes(s.id));
+      const keys = isSeries ? [`series:${query.tmdbId}:${query.season}:${query.episode}`, `series:${query.tmdbId}`] : [`movie:${query.tmdbId}`];
+      const results = asked.slice(0, N.maxScrapers).map((s) => {
+        const scraper = { id: s.id, name: s.name };
+        const answers = plainObject(repo.streams) && plainObject(repo.streams[s.id]) ? repo.streams[s.id] : {};
+        const hitKey = keys.find((k) => Object.prototype.hasOwnProperty.call(answers, k));
+        const hit = hitKey === undefined ? undefined : answers[hitKey];
+        if (!plainObject(hit)) return { scraper, ok: false, code: "not_found", message: "this scraper has no stream for the title" };
+        if (hit.delayMs > timeoutMs) return { scraper, ok: false, code: "timeout", message: `this scraper took longer than ${timeoutMs} ms` };
+        if (plainObject(hit.error)) return { scraper, ok: false, code: String(hit.error.code || "failed"), message: String(hit.error.message || "the scraper failed") };
+        if (typeof hit.url !== "string" || !hit.url) return { scraper, ok: false, code: "failed", message: "the scraper answered no address" };
+        const { delayMs, error, ...stream } = hit;
+        return { scraper, ok: true, stream };
+      });
+      return { results, truncated: asked.length > N.maxScrapers };
+    },
+  });
+
   // --- kino.meta (Kino 0.9.53): the app asks TMDB, AniList and the person's other meta plugins; the kit answers from a
   // fixture, else null. Same checks, same rate limit, same codes. ---
   const M = contract.kinoMeta;
@@ -1421,6 +1519,9 @@ export function createKino(manifest, { appVersion = "sdk", lang = "es-CO", devic
     // byTitle: true is Kino 0.9.55's feature flag (contract.additiveFromApp["kino.meta.byTitle"]).
     meta: manifest.apiVersion >= contract.kinoMeta.byTitle.apiVersion ? Object.assign(meta, { byTitle: true }) : meta,
     tmdb,
+    // Kino 0.9.71 (apiVersion 11, capability "nuvio"): the scrapers of the Nuvio repositories the manifest names. Feature-detect
+    // it: typeof kino.nuvio === "object".
+    nuvio: nuvioApi,
     // apiVersion 6: the app opens a hidden WebView; Node has none, so the kit answers as a device without one would.
     // A plugin's resolve should already fall back (another server, a plain kino.fetch path) on this code.
     // kino.browser.page ("browser": "pages", apiVersion 6) answers the same: a plugin keeps a plain kino.fetch path for it too.
@@ -1472,7 +1573,7 @@ export function createKino(manifest, { appVersion = "sdk", lang = "es-CO", devic
 
 /**
  * The app's signing lane (SigningLaneHost + prelude.js): sign() gets kino.crypto, kino.secret,
- * kino.config, kino.html and kino.log, never the network, storage, cookies, sleep, kino.meta or kino.tmdb. The refusals
+ * kino.config, kino.html and kino.log, never the network, storage, cookies, sleep, kino.meta, kino.tmdb or kino.nuvio. The refusals
  * are the app's: fetch rejects with host_not_allowed, the rest with not_allowed.
  */
 export function signingLane(kino) {
@@ -1487,6 +1588,7 @@ export function signingLane(kino) {
     sleep: async () => { throw why("kino.sleep"); },
     meta: async () => { throw why("kino.meta"); },
     tmdb: async () => { throw why("kino.tmdb"); },
+    nuvio: Object.freeze({ available: async () => { throw why("kino.nuvio"); }, use: async () => { throw why("kino.nuvio"); }, scrapers: async () => { throw why("kino.nuvio"); }, streams: async () => { throw why("kino.nuvio"); } }),
     ...(kino.browser ? { browser: Object.freeze({ captureAll: true, capture: async () => { throw why("kino.browser"); }, ...(kino.browser.page ? { page: async () => { throw why("kino.browser"); } } : {}) }) } : {}),
   });
 }

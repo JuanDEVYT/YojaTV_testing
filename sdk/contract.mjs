@@ -74,21 +74,33 @@ export function requiredExports(caps, settings = [], manifest = {}) {
 
 /** Same checks, same order, same English messages as the app's own manifest validation. Returns { ok, field?, message?, manifest? }. */
 const EXTERNAL_RESOLVER_BAD =
-  'The "externalResolver" field must be an object with a "package" (an Android package name) and, optionally, an "apk" with a GitHub release "url" (https://github.com/<owner>/<repo>/releases/download/<tag>/<file>) and a 64-character hex "sha256"; "fdroid" may only be true and "downloader" an object with a "code" of 3 to 10 digits';
+  'The "externalResolver" field must be an object with a "package" (an Android package name) and, optionally, an "apk" with a GitHub release or archive.org "url" (https://github.com/<owner>/<repo>/releases/download/<tag>/<file> or https://archive.org/download/<item>/<file>) and a 64-character hex "sha256"; "fdroid" may only be true and "downloader" an object with a "code" of 3 to 10 digits; "desktop" may only have "windows", "linux" and "macos", each an object with the same kind of "url" and "sha256"';
+const DESKTOP_SYSTEMS = ["windows", "linux", "macos"];
 const RESOLVER_APK_PATH = /^\/[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}\/releases\/(?:download\/[A-Za-z0-9._+-]{1,100}|latest\/download)\/[A-Za-z0-9._+-]{1,200}$/;
+const RESOLVER_ARCHIVE_PATH = /^\/download\/[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._+-]{1,200}$/;
 
-/** Whether `externalResolver` is well formed, as the app reads it: `{ package, apk?: { url, sha256, label? }, fdroid?: true, downloader?: { code } }`. */
+/** A `{ url, sha256 }` download: only a GitHub release asset or an archive.org file (that is where Kino fetches a recommended resolver from, nowhere else) and the sha256 its bytes must have. */
+function resolverDownloadOk(a) {
+  if (a === null || typeof a !== "object" || Array.isArray(a) || typeof a.url !== "string" || a.url.length > 2048 || /[\u0000-\u001f\u007f]/.test(a.url)) return false;
+  let u;
+  try { u = new URL(a.url); } catch { return false; }
+  if (u.protocol !== "https:" || u.port !== "" || u.username || u.password || u.search) return false;
+  if (!(u.hostname === "github.com" ? RESOLVER_APK_PATH : u.hostname === "archive.org" ? RESOLVER_ARCHIVE_PATH : /(?!)/).test(u.pathname)) return false;
+  return typeof a.sha256 === "string" && /^[0-9a-fA-F]{64}$/.test(a.sha256);
+}
+
+/** Whether `externalResolver` is well formed, as the app reads it: `{ package, apk?: { url, sha256, label? }, fdroid?: true, downloader?: { code }, desktop?: { windows|linux|macos: { url, sha256 } } }`. */
 export function externalResolverOk(r) {
   if (r === null || typeof r !== "object" || Array.isArray(r)) return false;
   if (typeof r.package !== "string" || r.package.length > 255 || !ANDROID_PACKAGE.test(r.package)) return false;
+  if (r.desktop !== undefined) {
+    const d = r.desktop;
+    if (d === null || typeof d !== "object" || Array.isArray(d)) return false;
+    for (const [os, p] of Object.entries(d)) if (!DESKTOP_SYSTEMS.includes(os) || !resolverDownloadOk(p)) return false;
+  }
   if (r.apk !== undefined) {
     const a = r.apk;
-    if (a === null || typeof a !== "object" || Array.isArray(a) || typeof a.url !== "string" || a.url.length > 2048 || /[\u0000-\u001f\u007f]/.test(a.url)) return false;
-    let u;
-    try { u = new URL(a.url); } catch { return false; }
-    // Only a GitHub release asset: that is where Kino downloads a recommended resolver from, nowhere else.
-    if (u.protocol !== "https:" || u.hostname !== "github.com" || u.port !== "" || u.username || u.password || u.search || !RESOLVER_APK_PATH.test(u.pathname)) return false;
-    if (typeof a.sha256 !== "string" || !/^[0-9a-fA-F]{64}$/.test(a.sha256)) return false;
+    if (!resolverDownloadOk(a)) return false;
     if (a.label !== undefined && (typeof a.label !== "string" || a.label.trim().length > 40 || /[\u0000-\u001f\u007f]/.test(a.label.trim()))) return false;
   }
   if (r.fdroid !== undefined && r.fdroid !== true) return false;
@@ -326,6 +338,14 @@ export function validateManifest(text, { knownPermissions = contract.permissions
   if (o.externalResolver !== undefined && o.apiVersion >= 11) {
     if (!caps.includes("externalResolve")) return bad("externalResolver", 'The "externalResolver" field needs the "externalResolve" capability');
     if (!externalResolverOk(o.externalResolver)) return bad("externalResolver", EXTERNAL_RESOLVER_BAD);
+  }
+  // apiVersion 11, `nuvioRepos`: the Nuvio repositories a `nuvio` plugin uses (ManifestParser: 1 to 4, each a GitHub owner/repo or an https address).
+  if (o.apiVersion >= 11 && (caps.includes("nuvio") || o.nuvioRepos !== undefined)) {
+    const repos = o.nuvioRepos;
+    const one = (r) => typeof r === "string" && (/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}(@[A-Za-z0-9._\/-]+)?$/.test(r.trim()) || /^https:\/\/[^\s/]+\/\S*$/i.test(r.trim()) || /^https:\/\/github\.com\/[^\s/]+\/[^\s/]+/i.test(r.trim()));
+    if (!caps.includes("nuvio") || !Array.isArray(repos) || repos.length < 1 || repos.length > 4 || !repos.every(one)) {
+      return bad("nuvioRepos", 'The "nuvioRepos" field must list 1 to 4 GitHub repositories (owner/repo) or https addresses of a Nuvio manifest, and goes with the "nuvio" capability, which needs it');
+    }
   }
   // Judged on what the app honours: below its apiVersion a field is ignored, so it forbids nothing there.
   if (catalogOnly) {
