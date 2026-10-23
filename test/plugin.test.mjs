@@ -642,6 +642,33 @@ test('details uses byTitle when a source has no id', async () => {
   } finally { globalThis.kino = real; }
 });
 
+test('home and section do not fan out metadata calls for every card', async () => {
+  const real = globalThis.kino;
+  let metaCalls = 0;
+  globalThis.kino = { ...real, meta: async () => { metaCalls++; return null; } };
+  try {
+    await plugin.home();
+    await plugin.section('series');
+    assert.equal(metaCalls, 0, 'metadata is loaded on title details, not catalog rows');
+  } finally { globalThis.kino = real; }
+});
+
+test('TMDB episodes use Kino meta episodes before Net79', async () => {
+  const real = globalThis.kino;
+  const calls = [];
+  globalThis.kino = {
+    ...real,
+    meta: async () => ({ title: 'Serie meta', ids: { tmdb: 1399 }, episodes: [{ season: 1, number: 1, title: 'Inicio' }], sources: ['tmdb'] }),
+    fetch: async (url) => { calls.push(url); return { ok: false, status: 404, url, text: () => '' }; }
+  };
+  try {
+    const result = await plugin.episodes({ ref: 'tmdb:series:1399:Serie' });
+    assert.equal(result.episodes.length, 1);
+    assert.equal(result.episodes[0].ref, 'tmdb:series:1399:1:1');
+    assert.ok(!calls.some((url) => url.includes('net79.cc')), 'Net79 is not needed when Kino has episodes');
+  } finally { globalThis.kino = real; }
+});
+
 /* ---------- 6.0.2 fixes: Cuevana domain, SoloLatino storage CSRF, CineHDPlus redirects ---------- */
 
 test('cuevana resolve targets cuevanaserie.pro', async () => {

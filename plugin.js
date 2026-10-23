@@ -3109,10 +3109,29 @@ registerSource({
   async episodes(path) {
     const { kind, title } = tmdbSplit(path);
     if (!title) return { episodes: [] };
+    const parsed = tmdbSplit(path);
+    if (parsed.kind === 'series' && parsed.id && typeof kino.meta === 'function') {
+      try {
+        const meta = await kino.meta({ type: 'series', ids: { tmdb: Number(parsed.id) }, lang: tmdbLang() });
+        if (meta && Array.isArray(meta.episodes) && meta.episodes.length) {
+          return {
+            series: { title: meta.title || title, ...(meta.poster ? { poster: meta.poster } : {}), ...(meta.backdrop ? { backdrop: meta.backdrop } : {}), ...(meta.ids ? { ids: meta.ids } : {}) },
+            episodes: meta.episodes.map((episode) => ({
+              season: Number(episode.season) || 1,
+              number: Number(episode.number),
+              title: episode.title,
+              overview: episode.overview,
+              still: episode.still,
+              airDate: episode.airDate,
+              ref: 'tmdb:series:' + parsed.id + ':' + (Number(episode.season) || 1) + ':' + Number(episode.number)
+            })).filter((episode) => episode.number > 0)
+          };
+        }
+      } catch (e) { log(`[tmdb] meta episodes unavailable: ${e && e.code ? e.code : 'error'}`); }
+    }
     // Las series del catálogo TMDB ya llevan un ID estable: consultar Net79 por
     // ese ID evita volver a buscar el título en todas las fuentes y conserva sus
     // temporadas reales.
-    const parsed = tmdbSplit(path);
     if (parsed.kind === 'series' && parsed.id && SOURCES.n79 && SOURCES.n79.episodes) {
       try {
         const direct = await SOURCES.n79.episodes('series:' + parsed.id);
@@ -3379,7 +3398,8 @@ export async function search(params) {
   }, deadlineAt);
   const settled = await raceDeadline(groups, 13000, 'deadline');
   if (settled === 'deadline') log('[search] plazo alcanzado: se rankea lo que ya llegó');
-  if (Date.now() < startedAt + 9000) await tmdbEnrich(all, query);
+  // Metadata is resolved on demand by details(); enriching every search hit
+  // here makes search spend dozens of meta/TMDB calls before returning.
   const kept = all.filter((it) => !futureYear(it.year));
   const results = mergeAndRank([kept], query).slice(0, 100);
   log(`[search] total ranked results: ${results.length}`);
@@ -3456,7 +3476,7 @@ export async function section(param) {
   const work = (async () => {
     const tmdbP = tmdbTabRows(selectedTab);
 
-    if (selectedTab === 'peliculas') {
+    if (tmdbWantSourceRows() && selectedTab === 'peliculas') {
       const list = [
         { key: 'sl', id: 'sec-sl-movies', title: '🎬 SoloLatino · Películas' },
         { key: 'cc', id: 'sec-cc-movies', title: '🍿 CineCalidad · Novedades' },
@@ -3472,7 +3492,7 @@ export async function section(param) {
         const mv = (await safeHome(SOURCES[s.key])).filter((x) => x.kind === 'movie');
         if (mv.length) rows.push({ id: s.id, title: s.title, items: mv.slice(0, 30), genre: 'peliculas', ref: 'browse:src:' + s.key });
       }, startedAt + 8000);
-    } else if (selectedTab === 'series') {
+    } else if (tmdbWantSourceRows() && selectedTab === 'series') {
       const list = [
         { key: 'cv', id: 'sec-cv-series', title: '📺 CuevanaSerie · Populares' },
         { key: 'sl', id: 'sec-sl-series', title: '🔥 SoloLatino · Temporadas' },
@@ -3484,7 +3504,7 @@ export async function section(param) {
         const sv = (await safeHome(SOURCES[s.key])).filter((x) => x.kind === 'series');
         if (sv.length) rows.push({ id: s.id, title: s.title, items: sv.slice(0, 30), genre: 'series', ref: 'browse:src:' + s.key });
       }, startedAt + 8000);
-    } else if (selectedTab === 'anime') {
+    } else if (tmdbWantSourceRows() && selectedTab === 'anime') {
       const list = [
         { key: 'av1', id: 'sec-av1-anime', title: '🔥 AnimeAV1 · Últimos episodios' },
         { key: 'afv', id: 'sec-afv-anime', title: '⭐ AnimeFLV · En emisión' },
@@ -3499,14 +3519,8 @@ export async function section(param) {
     let tmdb = await raceDeadline(tmdbP, Math.max(1, startedAt + 12000 - Date.now()), 'late');
     if (tmdb === 'late' || !tmdb || !Array.isArray(tmdb.rows)) tmdb = { rows: [], heroImage: null };
     if (tmdb.heroImage) hero.image = tmdb.heroImage;
-    // Give source rows the info-page fields Kino won't invent (ids.tmdb drives synopsis/rating/genres/cast;
-    // backdrop only counts if we provide it). One round-robin pass so every row shares the bounded budget.
-    const cols = rows.map((r) => r.items);
-    const flat = [];
-    const maxLen = cols.reduce((m, c) => Math.max(m, c.length), 0);
-    for (let i = 0; i < maxLen; i++) for (const c of cols) if (c[i]) flat.push(c[i]);
-    const enrichMs = startedAt + 14000 - Date.now();
-    if (enrichMs > 1500) await raceDeadline(enrichDetails(flat, 36), enrichMs, 'late');
+    // Source rows stay lightweight. Details and Kino's metadata service fill
+    // posters/backdrops when the person opens one title.
     // Ocultos del catálogo: fecha TMDB futura sin estrenar (__rel) o año futuro.
     for (const r of rows) r.items = r.items.filter((x) => !futureYear(x.year) && !x.__rel);
     const liveRows = rows.filter((r) => r.items.length);

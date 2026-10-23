@@ -62,7 +62,7 @@
       "label": "Filas de las fuentes",
       "labelEn": "Source rows",
       "type": "toggle",
-      "default": true,
+      "default": false,
       "hint": "Muestra las filas de cada fuente en Inicio",
       "hintEn": "Shows each source's rows on Home"
     },
