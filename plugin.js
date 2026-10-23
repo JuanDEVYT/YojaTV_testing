@@ -142,7 +142,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '6.0.4';
+const PLUGIN_VERSION = '6.0.5';
 
 function log(...args) {
   try {
@@ -208,6 +208,8 @@ async function liveCatalog() {
     const categories = [];
     for (const category of data.slice(0, 200)) {
       if (!category || !Array.isArray(category.items)) continue;
+      const categoryName = cleanText(category.title || category.id || '');
+      if (/24\/7|24\s*horas|\b24h\b/i.test(categoryName)) continue;
       const items = [];
       const seen = new Set();
       for (const item of category.items) {
@@ -225,7 +227,7 @@ async function liveCatalog() {
       }
       if (items.length) {
         const id = sanitizeId(category.id || category.title, 'iptv');
-        categories.push({ id, title: cleanText(category.title || id).slice(0, 80), items });
+        categories.push({ id, title: categoryName.slice(0, 80), items });
       }
     }
     _liveCatalogCache = categories;
@@ -3071,6 +3073,16 @@ registerSource({
   async episodes(path) {
     const { kind, title } = tmdbSplit(path);
     if (!title) return { episodes: [] };
+    // Las series del catálogo TMDB ya llevan un ID estable: consultar Net79 por
+    // ese ID evita volver a buscar el título en todas las fuentes y conserva sus
+    // temporadas reales.
+    const parsed = tmdbSplit(path);
+    if (parsed.kind === 'series' && parsed.id && SOURCES.n79 && SOURCES.n79.episodes) {
+      try {
+        const direct = await SOURCES.n79.episodes('series:' + parsed.id);
+        if (direct && Array.isArray(direct.episodes) && direct.episodes.length) return direct;
+      } catch {}
+    }
     const cands = await tmdbCandidates(title, 'series');
     let tried = 0;
     for (const c of cands) {

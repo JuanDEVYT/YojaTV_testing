@@ -751,3 +751,32 @@ test('live sources expose native TDT playlist and cached IPTV categories', async
     globalThis.kino = real;
   }
 });
+
+test('TMDB series episodes use the stable Net79 id before title fallback', async () => {
+  const real = globalThis.kino;
+  const calls = [];
+  globalThis.kino = {
+    ...real,
+    fetch: async (url) => {
+      calls.push(url);
+      if (url.includes('/api/catalog/detail?tmdbId=1399&type=tv')) {
+        return {
+          ok: true,
+          status: 200,
+          url,
+          text: () => JSON.stringify({ seasons: [{ season: 1, episodes: [{ episode: 1, title: 'Pilot' }] }] })
+        };
+      }
+      return { ok: false, status: 404, url, text: () => '' };
+    }
+  };
+  try {
+    const result = await plugin.episodes({ ref: 'tmdb:series:1399:' + encodeURIComponent('Juego de tronos') });
+    assert.equal(result.episodes.length, 1);
+    assert.equal(result.episodes[0].ref, 'n79:serie:1399:1:1');
+    assert.ok(calls.some((url) => url.includes('tmdbId=1399&type=tv')));
+    assert.ok(!calls.some((url) => url.includes('/api/catalog/search?q=')), 'title fan-out is not needed');
+  } finally {
+    globalThis.kino = real;
+  }
+});
