@@ -664,8 +664,20 @@ test('TMDB episodes use Kino meta episodes before Net79', async () => {
   try {
     const result = await plugin.episodes({ ref: 'tmdb:series:1399:Serie' });
     assert.equal(result.episodes.length, 1);
-    assert.equal(result.episodes[0].ref, 'tmdb:series:1399:1:1');
+    assert.equal(result.episodes[0].ref, 'n79:serie:1399:1:1');
     assert.ok(!calls.some((url) => url.includes('net79.cc')), 'Net79 is not needed when Kino has episodes');
+  } finally { globalThis.kino = real; }
+});
+
+test('Kino metadata series episodes produce directly resolvable Net79 refs', async () => {
+  const real = globalThis.kino;
+  globalThis.kino = {
+    ...real,
+    meta: async () => ({ title: 'Serie', ids: { tmdb: 1399 }, episodes: [{ season: 2, number: 3, title: 'Capítulo' }], sources: ['tmdb'] })
+  };
+  try {
+    const episodes = await plugin.episodes({ ref: 'tmdb:series:1399:Serie' });
+    assert.equal(episodes.episodes[0].ref, 'n79:serie:1399:2:3');
   } finally { globalThis.kino = real; }
 });
 

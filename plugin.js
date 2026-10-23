@@ -146,7 +146,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '6.1.0';
+const PLUGIN_VERSION = '6.1.1';
 
 function log(...args) {
   try {
@@ -3123,7 +3123,9 @@ registerSource({
               overview: episode.overview,
               still: episode.still,
               airDate: episode.airDate,
-              ref: 'tmdb:series:' + parsed.id + ':' + (Number(episode.season) || 1) + ':' + Number(episode.number)
+              // Episode refs must be directly resolvable; tmdb:series:<id>:<season>:<ep>
+              // is parsed as a title ref and becomes an invalid "1:1" lookup.
+              ref: 'n79:serie:' + parsed.id + ':' + (Number(episode.season) || 1) + ':' + Number(episode.number)
             })).filter((episode) => episode.number > 0)
           };
         }
