@@ -669,6 +669,27 @@ test('TMDB episodes use Kino meta episodes before Net79', async () => {
   } finally { globalThis.kino = real; }
 });
 
+test('safe HLS resolve results are cached within the runtime', async () => {
+  const real = globalThis.kino;
+  let calls = 0;
+  globalThis.kino = {
+    ...real,
+    fetch: async (url) => {
+      calls++;
+      if (url.includes('cuevanaserie.pro') && url.includes('ver.html')) {
+        return { ok: true, status: 200, url, text: () => 'player.src({ src: "https://cdn.example/cached.m3u8" })' };
+      }
+      return { ok: false, status: 404, url, text: () => '' };
+    }
+  };
+  try {
+    await plugin.resolve({ ref: 'cv:/peliculas/cache-test/' });
+    const first = calls;
+    await plugin.resolve({ ref: 'cv:/peliculas/cache-test/' });
+    assert.equal(calls, first, 'second resolve reuses the safe HLS stream cache');
+  } finally { globalThis.kino = real; }
+});
+
 test('Kino metadata series episodes produce directly resolvable Net79 refs', async () => {
   const real = globalThis.kino;
   globalThis.kino = {

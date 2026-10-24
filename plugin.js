@@ -146,7 +146,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '6.1.1';
+const PLUGIN_VERSION = '6.1.2';
 
 function log(...args) {
   try {
@@ -166,6 +166,8 @@ function fetchBudgetReset() { FETCH_BUDGET = 60; }
 const SOURCE_CACHE_TTL_MS = 5 * 60 * 1000;
 const _sourceSearchCache = new Map();
 const _sourceHomeCache = new Map();
+const RESOLVE_CACHE_TTL_MS = 10 * 60 * 1000;
+const _resolveCache = new Map();
 
 function sourceCacheGet(cache, key) {
   const entry = cache.get(key);
@@ -571,7 +573,7 @@ async function probeStream(url, headers) {
   const isMp4 = /\.mp4(\?|$)/i.test(url);
   if (isMp4) h.Range = 'bytes=0-1';
   try {
-    const res = await kino.fetch(url, { method: 'GET', headers: h, cookies: false, timeoutMs: 4000 });
+    const res = await kino.fetch(url, { method: 'GET', headers: h, cookies: false, timeoutMs: 2500 });
     const ok = !!res && (res.ok || res.status === 206);
     if (!ok) {
       log(`[probe] descartado (${res && res.status ? res.status : 'err'}) <- ${url}`);
@@ -3639,6 +3641,7 @@ export async function action(key) {
     try { for (const k of kino.storage.keys()) if (k.indexOf('tmdb:') === 0) { kino.storage.remove(k); n++; } } catch {}
     _sourceSearchCache.clear();
     _sourceHomeCache.clear();
+    _resolveCache.clear();
     _liveCatalogCache = null;
     _liveCatalogCacheAt = 0;
     log(`[action] clearCache removed ${n} tmdb entries`);
@@ -3882,6 +3885,11 @@ export async function episodes(params) {
 }
 
 async function resolveOneRef(ref) {
+  const cached = _resolveCache.get(ref);
+  if (cached && Date.now() - cached.at < RESOLVE_CACHE_TTL_MS) {
+    log(`[resolve cache] hit: ${ref}`);
+    return cached.stream;
+  }
   let srcId, path;
   if (ref.includes(':')) {
     const parts = ref.split(':');
@@ -3895,10 +3903,17 @@ async function resolveOneRef(ref) {
   if (!src || !src.resolve) return null;
   let stream;
   try { stream = await src.resolve(path); } catch { return null; }
+  const cacheable = srcId !== 'hs' && stream && stream.url &&
+    !/vimeos|goodstream|\.mp4(?:\?|$)/i.test(stream.url);
+  if (cacheable) {
+    _resolveCache.set(ref, { at: Date.now(), stream });
+    return stream;
+  }
   return stream && stream.url ? stream : null;
 }
 
 export async function resolve(params) {
+  const startedAt = Date.now();
   await kino.sleep(0);
   fetchBudgetReset();
   let ref = '';
@@ -3953,7 +3968,7 @@ export async function resolve(params) {
       return false;
     }
 
-    // Oleada 1: primeras 2 fuentes en paralelo. Si alguna responde sano, salimos de inmediato.
+    // Oleada 1: primeras 2 fuentes principales en paralelo (carrera al primer stream).
     let found = await tryBatch(refs.slice(0, 2));
 
     // Si fallaron ambas, probar las siguientes 2
@@ -4007,7 +4022,7 @@ export async function resolve(params) {
       pushAlt(name, { ref: r });
     }
 
-    log(`[resolve OK] merged resolved rápido via ${primary.srcId}: ${primary.url} (${alts.length} alts)`);
+    log(`[resolve OK] merged resolved rápido via ${primary.srcId}: ${primary.url} (${alts.length} alts, ${Date.now() - startedAt} ms)`);
     return {
       url: primary.url,
       label: primary.label,
@@ -4026,7 +4041,7 @@ export async function resolve(params) {
     log(`[resolve ERROR] no stream returned for ${ref}`);
     throw kino.error('unavailable', 'No se encontró un servidor de reproducción', { userMessage: 'Este título no se ha encontrado en YojaTV' });
   }
-  log(`[resolve OK] stream resolved: ${stream.url}`);
+  log(`[resolve OK] stream resolved: ${stream.url} (${Date.now() - startedAt} ms)`);
   return labelStream(stream, SOURCES[sid].label || sid);
 }
 
