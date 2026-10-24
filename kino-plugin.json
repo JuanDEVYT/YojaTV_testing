@@ -303,5 +303,9 @@
     "callistanise.com",
     "*.callistanise.com"
   ],
-  "icon": "icon.png"
+  "icon": "icon.png",
+  "signature": {
+    "authorKey": "c3caf0f9e51197553082904a2655d51e5afcca579a3048cdfbd8a97f7b2cf2c3",
+    "value": "3c5ee16817f6e52db6a0afb065ed9e6329cfec905c4fb9bc83bec550560c27f2187974e9bc723cb0892342c4196c177e6ea97cb68a85fb0aae8c010ab5a1c208"
+  }
 }
