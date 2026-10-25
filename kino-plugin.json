@@ -72,8 +72,8 @@
       "labelEn": "Send error reports",
       "type": "toggle",
       "default": true,
-      "hint": "Envía a la página de estado de YojaTV los errores y sus registros, con un ID anónimo de este dispositivo",
-      "hintEn": "Sends errors and their logs to the YojaTV status page, with an anonymous ID for this device"
+      "hint": "Envía errores y registros a la página de estado, con un ID anónimo",
+      "hintEn": "Sends errors and logs to the status page with an anonymous ID"
     },
     {
       "key": "estado",
