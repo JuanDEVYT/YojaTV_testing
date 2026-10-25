@@ -146,7 +146,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '7.1.1';
+const PLUGIN_VERSION = '7.1.2';
 
 function log(...args) {
   try { ringPush(args); } catch {}
@@ -3767,7 +3767,7 @@ async function settingsStatus() {
   lines.push(ready ? (kt ? 'Catálogo TMDB activo · llave de Kino (' + lang + ')' : 'Catálogo TMDB activo (' + lang + ')') : 'Sin API key de TMDB: el catálogo usa solo las fuentes');
   lines.push(src ? 'Filas de fuentes: activadas' : 'Filas de fuentes: ocultas');
   lines.push(ready ? (kt ? 'Búsqueda enriquecida con TMDb (sin llave propia)' : 'Búsqueda enriquecida con TMDb') : 'Pega tu API key para mejorar el catálogo');
-  lines.push(reportingEnabled() ? 'Reporte de errores: activado · ID ' + deviceId().slice(2, 10) : 'Reporte de errores: desactivado');
+  lines.push(reportingEnabled() ? 'Reporte de errores: activado · ID ' + deviceId().slice(2, 10) : 'Reporte de errores: desactivado (ID ' + deviceId().slice(2, 10) + ')');
   return { estado: lines.join(' · ') };
 }
 
@@ -3789,6 +3789,9 @@ async function action(key) {
     reportError('test', 'testReport', new Error('Reporte de prueba desde Ajustes'));
     const ok = await flushReports();
     return { message: ok ? 'Enviado ✓ · ID ' + deviceId().slice(2, 10) : 'No se pudo contactar el servicio de estado' };
+  }
+  if (key === 'showDeviceId') {
+    return { message: 'ID del dispositivo: ' + deviceId().slice(2, 10) + ' · versión ' + PLUGIN_VERSION };
   }
   if (key === 'testTmdb') {
     const kt = typeof kino.tmdb === 'function';
