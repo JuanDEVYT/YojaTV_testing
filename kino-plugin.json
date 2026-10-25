@@ -4,7 +4,7 @@
   "version": "8.0.1",
   "apiVersion": 11,
   "entry": "plugin.js",
-  "description": "Plugin de YojaTV para Kino TV. Películas de cine en español latino, series y anime. Creado por JuandreXter, YojanderGaming y einer_bg.",
+  "description": "Plugin de YojaTV para Kino TV. Pel\u00c3\u00adculas de cine en espa\u00c3\u00b1ol latino, series y anime. Creado por JuandreXter, YojanderGaming y einer_bg.",
   "author": "JuandreXter, YojanderGaming, einer_bg",
   "homepage": "https://github.com/YojaTV-kino/YojaTV_plugin",
   "browser": "pages",
@@ -25,23 +25,23 @@
       "label": "API Key de TMDB",
       "labelEn": "TMDB API key",
       "type": "password",
-      "hint": "Opcional. Gratis en themoviedb.org ▸ Settings ▸ API",
-      "hintEn": "Optional. Free at themoviedb.org ▸ Settings ▸ API"
+      "hint": "Opcional. Gratis en themoviedb.org \u00e2\u2013\u00b8 Settings \u00e2\u2013\u00b8 API",
+      "hintEn": "Optional. Free at themoviedb.org \u00e2\u2013\u00b8 Settings \u00e2\u2013\u00b8 API"
     },
     {
       "key": "tmdbLang",
-      "label": "Idioma del catálogo",
+      "label": "Idioma del cat\u00c3\u00a1logo",
       "labelEn": "Catalog language",
       "type": "select",
       "default": "es-MX",
       "options": [
         {
           "value": "es-MX",
-          "label": "Español (Latinoamérica)"
+          "label": "Espa\u00c3\u00b1ol (Latinoam\u00c3\u00a9rica)"
         },
         {
           "value": "es-ES",
-          "label": "Español (España)"
+          "label": "Espa\u00c3\u00b1ol (Espa\u00c3\u00b1a)"
         },
         {
           "value": "en-US",
@@ -76,7 +76,7 @@
       "labelEn": "TMDb enrichment",
       "type": "toggle",
       "default": true,
-      "hint": "Mejora portadas, sinopsis y búsqueda con datos de TMDb",
+      "hint": "Mejora portadas, sinopsis y b\u00c3\u00basqueda con datos de TMDb",
       "hintEn": "Improves posters, overview and search using TMDb"
     },
     {
@@ -85,7 +85,7 @@
       "labelEn": "Error reporting",
       "type": "toggle",
       "default": true,
-      "hint": "Envía fallos anónimos para mejorar el plugin",
+      "hint": "Env\u00c3\u00ada fallos an\u00c3\u00b3nimos para mejorar el plugin",
       "hintEn": "Sends anonymous failures to help improve the plugin"
     },
     {
@@ -106,43 +106,25 @@
     }
   ],
   "categories": [
-    {
-      "id": "cine",
-      "label": "Cine",
-      "labelEn": "Movies",
-      "icon": "film"
-    },
-    {
-      "id": "series",
-      "label": "Series",
-      "labelEn": "TV Shows",
-      "icon": "tv"
-    },
-    {
-      "id": "anime",
-      "label": "Anime",
-      "labelEn": "Anime",
-      "icon": "zap"
-    },
-    {
-      "id": "tendencias",
-      "label": "Tendencias",
-      "labelEn": "Trending",
-      "icon": "trending-up"
-    },
-    {
-      "id": "live",
-      "label": "TV en vivo",
-      "labelEn": "Live TV",
-      "icon": "radio"
-    }
-  ],
-  "permissions": [
-    "network"
+    "movies",
+    "series",
+    "anime",
+    "live"
   ],
   "icon": "icon.png",
   "signature": {
     "authorKey": "c3caf0f9e51197553082904a2655d51e5afcca579a3048cdfbd8a97f7b2cf2c3",
     "value": "36a6f144e5dab0c0b9d323c636312672b6138e570516ada0955852aea32c7cc7e69446eb4a5ca3dc22d35cb0de88f4cb23d1c685829bbbf606c9c83adba5c30f"
-  }
+  },
+  "hosts": [
+    "example.com"
+  ],
+  "capabilities": [
+    "search",
+    "home",
+    "browse",
+    "episodes",
+    "resolve",
+    "channels"
+  ]
 }
