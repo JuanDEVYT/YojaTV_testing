@@ -1,7 +1,7 @@
 {
   "id": "yoja-tv-kino",
   "name": "YojaTV-alpha",
-  "version": "7.1.0",
+  "version": "7.1.1",
   "apiVersion": 11,
   "entry": "plugin.js",
   "description": "Plugin de YojaTV para Kino TV. Películas de cine en español latino, series y anime. Creado por JuandreXter, YojanderGaming y einer_bg.",
@@ -328,6 +328,6 @@
   "icon": "icon.png",
   "signature": {
     "authorKey": "c3caf0f9e51197553082904a2655d51e5afcca579a3048cdfbd8a97f7b2cf2c3",
-    "value": "24f53d93c82d644080ccaf67287d7674c66b0d2fecac07f15a6327626ec8df020b1f26472392417b75af97a7f7536dbd4c30866992d341f73f450c0c5e4fdb0c"
+    "value": "50e10c93972bd561059259caba6245557a69951eb4817c1a659e1c967c0e668c0c73ec1a4a8e81da94fa895ebdd7975916eb3b0ed6eb97eda8aef7313925c508"
   }
 }
