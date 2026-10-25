@@ -146,7 +146,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '8.0.0';
+const PLUGIN_VERSION = '8.0.1';
 
 function log(...args) {
   try { ringPush(args); } catch {}
@@ -230,11 +230,22 @@ function reportError(kind, fn, err, extra) {
   } catch {}
 }
 
+function hostOfUrl(url) {
+  try { return String(url).replace(/^[a-z]+:\/\//i, '').split(/[\/?#]/)[0].toLowerCase(); } catch { return ''; }
+}
+
+// El motor corta peticiones ("z0 was cancelled") al vencer el plazo o al ganar
+// otro probe: no son fallos de la fuente y no deben generar incidentes.
+function isCancelledError(err) {
+  const msg = String((err && (err.message || err.code)) || '').toLowerCase();
+  return msg.includes('was cancelled') || msg.includes('canceled') || msg.includes('aborted');
+}
+
 function reportHttp(method, url, status, err) {
   try {
+    if (isCancelledError(err)) return;
     if (!(status === 0 || status >= 500 || status === 401 || status === 403 || status === 429)) return;
-    let host = '';
-    try { host = String(url).replace(/^[a-z]+:\/\//i, '').split(/[\/?#]/)[0].toLowerCase(); } catch {}
+    const host = hostOfUrl(url);
     reportError('http', method, err || new Error(status ? 'HTTP ' + status : 'Fallo de red'), { url, status, host });
   } catch {}
 }
@@ -324,7 +335,8 @@ let _liveCatalogCacheAt = 0;
 async function liveCatalog() {
   if (_liveCatalogCache && Date.now() - _liveCatalogCacheAt < 6 * 60 * 60 * 1000) return _liveCatalogCache;
   try {
-    const data = await fetchJson(IPTV_CATALOG_URL);
+    // Son ~3 MB: con los 7 s por defecto algún TV lo corta a mitad de descarga.
+    const data = await fetchJson(IPTV_CATALOG_URL, null, 20000);
     if (!Array.isArray(data)) return _liveCatalogCache || [];
     const categories = [];
     for (const category of data.slice(0, 200)) {
@@ -359,7 +371,46 @@ async function liveCatalog() {
   }
 }
 
+// Un host que acumula 3 caídas reales (timeout / error de red / 5xx) se omite 3
+// minutos: si la fuente está caída, no se castiga cada búsqueda con su espera.
+const HOST_STRIKES = 3;
+const HOST_QUARANTINE_MS = 3 * 60 * 1000;
+const _hostHealth = new Map();
+
+function hostQuarantined(host) {
+  const h = host ? _hostHealth.get(host) : null;
+  return !!(h && h.until > Date.now());
+}
+
+function noteHostFailure(url, status) {
+  if (!(status === 0 || status >= 500)) return; // 401/403/429 son rate-limit o auth, no caída
+  const host = hostOfUrl(url);
+  if (!host) return;
+  const h = _hostHealth.get(host) || { strikes: 0, until: 0 };
+  h.strikes++;
+  if (h.strikes >= HOST_STRIKES) {
+    h.until = Date.now() + HOST_QUARANTINE_MS;
+    h.strikes = 0;
+    log(`[HTTP CUARENTENA] ${host} no responde; se omite por 3 min`);
+  }
+  _hostHealth.set(host, h);
+}
+
+function noteHostOk(url) {
+  const host = hostOfUrl(url);
+  if (host) _hostHealth.delete(host);
+}
+
+function retryableStatus(status) {
+  return status === 403 || status === 429 || status >= 500;
+}
+
 async function fetchText(url, headers, timeoutMs) {
+  const host = hostOfUrl(url);
+  if (hostQuarantined(host)) {
+    log(`[HTTP GET SKIP] ${host} en cuarentena <- ${url}`);
+    return { ok: false, status: 0, text: '', quarantined: true };
+  }
   if (FETCH_BUDGET <= 0) {
     log(`[HTTP GET BUDGET] cupo de 60 por llamada agotado <- ${url}`);
     return { ok: false, status: 0, text: '', budget: true };
@@ -370,24 +421,35 @@ async function fetchText(url, headers, timeoutMs) {
     const opts = { headers: { ...HEADERS, ...(headers || {}) } };
     const t = Math.trunc(Number(timeoutMs));
     opts.timeoutMs = Math.min(Number.isFinite(t) && t > 0 ? t : DEFAULT_FETCH_TIMEOUT_MS, 30000);
-    const res = await kino.fetch(url, opts);
+    let res = await kino.fetch(url, opts);
+    // 403/429/5xx suelen ser cortes por ráfaga en el WAF de la fuente: un
+    // reintento corto recupera la respuesta sin gastar el presupuesto entero.
+    if (!res.ok && retryableStatus(res.status) && FETCH_BUDGET > 12) {
+      FETCH_BUDGET--;
+      log(`[HTTP GET RETRY] ${res.status} <- ${url}`);
+      await kino.sleep(300 + Math.floor(Math.random() * 400));
+      res = await kino.fetch(url, opts);
+    }
     if (!res.ok) {
       log(`[HTTP GET FAIL] ${res.status} <- ${url}`);
       reportHttp('GET', url, res.status);
+      noteHostFailure(url, res.status);
       return { ok: false, status: res.status, text: '' };
     }
+    noteHostOk(url);
     const txt = getText(res);
     log(`[HTTP GET OK] ${res.status} (${txt.length} chars) <- ${url}`);
     return { ok: true, status: res.status, text: txt, url: res.url };
   } catch (e) {
     log(`[HTTP GET ERROR] ${e ? e.message : e} <- ${url}`);
     reportHttp('GET', url, 0, e);
+    if (!isCancelledError(e)) noteHostFailure(url, 0);
     return { ok: false, status: 0, text: '', error: e };
   }
 }
 
-async function fetchJson(url, headers) {
-  const r = await fetchText(url, { Accept: 'application/json', ...(headers || {}) });
+async function fetchJson(url, headers, timeoutMs) {
+  const r = await fetchText(url, { Accept: 'application/json', ...(headers || {}) }, timeoutMs);
   if (!r.ok) return null;
   try {
     return JSON.parse(r.text);
@@ -454,9 +516,45 @@ async function getHtml(url, opts) {
 }
 
 function isChallengePage(html) {
-  if (!html || html.length > 30000) return false;
+  if (!html) return false;
   const t = html.toLowerCase();
-  return t.includes('just a moment') || t.includes('cf-browser-verification') || t.includes('un momento') || t.includes('ddos-guard');
+  if (t.includes('just a moment') || t.includes('cf-chl') || t.includes('challenge-platform') ||
+      t.includes('cf-browser-verification') || t.includes('ddos-guard') ||
+      t.includes('checking your browser') || t.includes('attention required')) return true;
+  // El aviso en español solo cuenta en páginas de chequeo (pequeñas): un
+  // reproductor completo puede decir "verificando" sin estar bloqueado.
+  return html.length < 8000 && (t.includes('un momento') || t.includes('verificando'));
+}
+
+/** Token/geo bloqueado por el propio embed: el WebView no lo puede resolver. */
+function isBlockedEmbed(html) {
+  const t = String(html || '').slice(0, 20000).toLowerCase();
+  return t.includes('acceso bloqueado') || t.includes('token de acceso') || t.includes('err_token') ||
+    t.includes('no disponible en tu país') || t.includes('not available in your country');
+}
+
+/** WebView oculto: pulsa play y devuelve la petición de video real del embed. */
+async function captureStream(url, referer, timeoutMs) {
+  if (!kino.browser || typeof kino.browser.capture !== 'function') return null;
+  try {
+    const page = await kino.browser.capture(url, {
+      ...(referer ? { headers: { Referer: referer } } : {}),
+      timeoutMs: timeoutMs || 18000
+    });
+    const media = page && Array.isArray(page.media) ? page.media.filter((m) => m && m.url) : [];
+    if (media.length === 0) return null;
+    const [first, ...rest] = media;
+    const subs = Array.isArray(page.subtitles) ? page.subtitles.filter((s) => s && s.url).slice(0, 10) : [];
+    return {
+      url: first.url,
+      headers: first.headers || {},
+      ...(rest.length ? { alternatives: rest.slice(0, 7).map((m) => ({ url: m.url, headers: m.headers || {} })) } : {}),
+      ...(subs.length ? { subtitles: subs.map((s) => ({ url: s.url, lang: s.lang || 'es' })) } : {})
+    };
+  } catch (e) {
+    log(`[browser] captura no disponible (${e && e.code ? e.code : (e && e.message) || 'error'}) <- ${url}`);
+    return null;
+  }
 }
 
 /** PelisGratisHDs' go_to_player arg: base64 of a rot13'd url. */
@@ -1055,16 +1153,23 @@ async function resolveEmbedUrl(embedUrl, referer) {
   if (SKIP_HOSTS.some((h) => u.includes(h))) return null;
 
   try {
-    const gen = await fetchText(u, { Referer: referer }, 5000);
+    let gen = await fetchText(u, { Referer: referer }, 5000);
     if (!gen.ok || !gen.text || gen.text.length < 50) return null;
-    if (
-      gen.text.includes('challenge-platform') ||
-      gen.text.includes('cf-chl') ||
-      gen.text.includes('Attention Required! | Cloudflare') ||
-      gen.text.includes('Just a moment...') ||
-      gen.text.includes('checking your browser')
-    ) {
+    let viaBrowser = false;
+    if (isChallengePage(gen.text)) {
       log(`[generic] cloudflare/bot-check detectado en embed <- ${u}`);
+      // El WebView oculto completa el chequeo automático y devuelve el HTML ya
+      // cargado; en el kit de Node no hay navegador y se sigue con el null.
+      const pg = await getHtml(u, { headers: { Referer: referer }, timeoutMs: 18000 });
+      if (!pg.ok || !pg.text || pg.text === gen.text || isChallengePage(pg.text)) {
+        log(`[generic] el chequeo del embed no pasó <- ${u}`);
+        return null;
+      }
+      gen = pg;
+      viaBrowser = true;
+    }
+    if (isBlockedEmbed(gen.text)) {
+      log(`[generic] embed bloqueado por token/geo <- ${u}`);
       return null;
     }
 
@@ -1104,6 +1209,12 @@ async function resolveEmbedUrl(embedUrl, referer) {
         ifrLower.includes('video') || ifrLower.includes('/v/') || ifrLower.includes('/e/') ||
         /\.(m3u8|mp4)/i.test(ifrLower);
       if (isVideoLike) return resolveEmbedUrl(ifr[1], u);
+    }
+    // Reproductor que solo pide el video por JS (el HTML no trae la URL): se
+    // captura en el WebView oculto que acaba de pasar el chequeo.
+    if (viaBrowser) {
+      const captured = await captureStream(u, referer, 18000);
+      if (captured) return captured;
     }
   } catch {}
 
@@ -1264,7 +1375,9 @@ registerSource({
   label: 'JKAnime',
   kind: 'anime',
   async search(q) {
-    const r = await fetchText('https://jkanime.net/buscar/' + encodeURIComponent(q) + '/');
+    // jkanime suele contestar 502 o colgarse; con 4,5 s no bloquea al resto de
+    // fuentes y la cuarentena de host evita repetir la espera en cada búsqueda.
+    const r = await fetchText('https://jkanime.net/buscar/' + encodeURIComponent(q) + '/', null, 4500);
     if (!r.ok) return [];
     const match = r.text.match(/var\s+animes\s*=\s*(\{[\s\S]*?\});\s*(?:var|\n|<)/);
     if (match) {
@@ -1585,7 +1698,7 @@ registerSource({
   label: 'CineHDPlus',
   kind: 'movie',
   async search(q) {
-    const j = await fetchJson('https://cinehdplus.org/wp-json/api_v1/buscar/?keyword=' + encodeURIComponent(q));
+    const j = await fetchJson('https://cinehdplus.org/wp-json/api_v1/buscar/?keyword=' + encodeURIComponent(q), { Referer: 'https://cinehdplus.org/' });
     if (!Array.isArray(j)) return [];
     return j.slice(0, 40).map((x) => {
       const permalink = x.permalink || '';
@@ -1761,7 +1874,7 @@ registerSource({
   label: 'SoloLatino',
   kind: 'movie',
   async search(q) {
-    const j = await fetchJson('https://sololatino.net/api/search/suggest?q=' + encodeURIComponent(q));
+    const j = await fetchJson('https://sololatino.net/api/search/suggest?q=' + encodeURIComponent(q), { Referer: 'https://sololatino.net/' });
     if (!Array.isArray(j)) return [];
     return j.slice(0, 40).map((x) => {
       const url = x.url || '';
@@ -2132,30 +2245,56 @@ registerSource({
 /* --- PLUTO.TV (JSON API, free live/VOD) --- */
 let _plutoToken = null;
 let _plutoTokenTs = 0;
+let _plutoStitcherParams = '';
 async function getPlutoToken() {
   const now = Date.now();
   if (_plutoToken && (now - _plutoTokenTs) < 3600000) return _plutoToken;
   const j = await fetchJson('https://boot.pluto.tv/v4/start?appName=web&appVersion=unknown&deviceVersion=126.0.0.0&deviceModel=web&deviceMake=Chrome&deviceType=web&clientID=web&clientModelNumber=1.0');
   const tok = j && (j.sessionToken || (j.session && j.session.sessionToken));
+  if (j && typeof j.stitcherParams === 'string') _plutoStitcherParams = j.stitcherParams;
   if (tok) { _plutoToken = tok; _plutoTokenTs = now; }
   return _plutoToken || null;
+}
+function plutoStitcherParams() {
+  return _plutoStitcherParams || 'appName=web&appVersion=unknown&deviceMake=Chrome&deviceModel=web&deviceType=web&deviceVersion=126.0.0.0&clientID=web&clientModelNumber=1.0&serverSideAds=false';
 }
 registerSource({
   id: 'pluto',
   label: 'Pluto TV',
   kind: 'movie',
   async search(q) {
-    // Fixed: param is q= not query=
-    const j = await fetchJson('https://service-media-search.clusters.pluto.tv/v1/search?q=' + encodeURIComponent(q) + '&limit=30');
-    if (!j || !Array.isArray(j.hits)) return [];
-    return j.hits.slice(0, 30).map((h, i) => {
-      const id = sanitizeId(h.id || h.slug || String(i), 'pluto');
-      return { id, ref: 'pluto:' + (h.id || h.slug || ''), title: cleanText(h.title) || slugToTitle(h.slug || ''), kind: 'movie', poster: h.poster || null, overview: h.description || null };
-    }).filter((x) => x.ref && x.ref.split(':')[1]);
+    // Fixed: param is q= not query=. La API exige el sessionToken de /v4/start
+    // como Bearer: sin él responde 401 (incidente d26412da9792f7bb).
+    const url = 'https://service-media-search.clusters.pluto.tv/v1/search?q=' + encodeURIComponent(q) + '&limit=30';
+    let token = await getPlutoToken();
+    if (!token) return [];
+    let j = await fetchJson(url, { Authorization: 'Bearer ' + token });
+    if (!j && FETCH_BUDGET > 6) {
+      // El token cacheado pudo caducar: se renueva y se reintenta una vez.
+      _plutoToken = null;
+      _plutoTokenTs = 0;
+      token = await getPlutoToken();
+      if (token) j = await fetchJson(url, { Authorization: 'Bearer ' + token });
+    }
+    const hits = j && Array.isArray(j.data) ? j.data : (j && Array.isArray(j.hits) ? j.hits : []);
+    if (hits.length === 0) return [];
+    // La respuesta trae channels/movies/series; el resolve solo reproduce VOD
+    // de tipo movie, así que no se ofrecen canales ni series sin episodios.
+    return hits.filter((h) => h && h.id && h.type === 'movie').slice(0, 30).map((h) => {
+      const id = sanitizeId(h.id, 'pluto');
+      return { id, ref: 'pluto:' + h.id, title: cleanText(h.name) || slugToTitle(h.slug || ''), kind: 'movie', year: null };
+    });
   },
   async resolve(path) {
+    const id = String(path || '').split(':')[0];
+    if (!id) return null;
+    // El token se pide antes del stitcher: /v4/start aporta country y
+    // marketingRegion, sin ellos el stitcher responde 400.
     const token = await getPlutoToken();
     const authHdr = token ? { 'Authorization': 'Bearer ' + token } : {};
+    const stitchUrl = 'https://cfd-v4-service-channel-stitcher-use1-1.prd.pluto.tv/stitch/hls/episode/' + encodeURIComponent(id) + '/master.m3u8?' + plutoStitcherParams();
+    const st = await fetchText(stitchUrl, null, 8000);
+    if (st.ok && /#EXTM3U/i.test(st.text)) return { url: st.url || stitchUrl };
     const j = await fetchJson('https://service-vod.clusters.pluto.tv/v2/item/' + path + '/playbackInfo?deviceMake=Chrome&deviceType=web&deviceVersion=126.0.0.0&appName=web&appVersion=unknown', authHdr);
     if (j && j.data) {
       const m3u = String(j.data).match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
@@ -2630,7 +2769,8 @@ registerSource({
   label: 'OnlyFlix',
   kind: 'movie',
   async search(q) {
-    const j = await fetchJson('https://onlyflix.to/wp-json/wp/v2/search?search=' + encodeURIComponent(q) + '&per_page=30');
+    // per_page=30 devuelve 400 "outside the supported limits" (onlyflix_search_page_limits).
+    const j = await fetchJson('https://onlyflix.to/wp-json/wp/v2/search?search=' + encodeURIComponent(q) + '&per_page=10');
     if (!Array.isArray(j)) return [];
     return j.slice(0, 30).map((x) => {
       const type = String(x.subtype || x.type || '').toLowerCase().includes('serie') || String(x.subtype || '').toLowerCase() === 'tv' ? 'series' : 'movie';
