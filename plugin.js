@@ -146,7 +146,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '7.1.2';
+const PLUGIN_VERSION = '8.0.0';
 
 function log(...args) {
   try { ringPush(args); } catch {}
