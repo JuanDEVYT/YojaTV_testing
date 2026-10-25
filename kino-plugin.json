@@ -1,7 +1,7 @@
 {
   "id": "yoja-tv-kino",
   "name": "YojaTV-alpha",
-  "version": "6.1.2",
+  "version": "7.1.0",
   "apiVersion": 11,
   "entry": "plugin.js",
   "description": "Plugin de YojaTV para Kino TV. Películas de cine en español latino, series y anime. Creado por JuandreXter, YojanderGaming y einer_bg.",
@@ -67,6 +67,15 @@
       "hintEn": "Shows each source's rows on Home"
     },
     {
+      "key": "reportErrors",
+      "label": "Enviar reportes de errores",
+      "labelEn": "Send error reports",
+      "type": "toggle",
+      "default": true,
+      "hint": "Envía a la página de estado de YojaTV los errores y sus registros, con un ID anónimo de este dispositivo",
+      "hintEn": "Sends errors and their logs to the YojaTV status page, with an anonymous ID for this device"
+    },
+    {
       "key": "estado",
       "label": "Estado",
       "labelEn": "Status",
@@ -84,6 +93,12 @@
       "key": "testTmdb",
       "label": "Probar conexión con TMDB",
       "labelEn": "Test TMDB connection",
+      "type": "action"
+    },
+    {
+      "key": "testReport",
+      "label": "Enviar reporte de prueba",
+      "labelEn": "Send test report",
       "type": "action"
     }
   ],
@@ -110,6 +125,9 @@
       "titleEn": "Diagnostics",
       "children": [
         {
+          "setting": "reportErrors"
+        },
+        {
           "setting": "estado"
         },
         {
@@ -117,6 +135,9 @@
         },
         {
           "setting": "testTmdb"
+        },
+        {
+          "setting": "testReport"
         }
       ]
     }
@@ -301,11 +322,12 @@
     "byselapuix.com",
     "animeav1.uns.bio",
     "callistanise.com",
-    "*.callistanise.com"
+    "*.callistanise.com",
+    "yojatv-status.onrender.com"
   ],
   "icon": "icon.png",
   "signature": {
     "authorKey": "c3caf0f9e51197553082904a2655d51e5afcca579a3048cdfbd8a97f7b2cf2c3",
-    "value": "3c5ee16817f6e52db6a0afb065ed9e6329cfec905c4fb9bc83bec550560c27f2187974e9bc723cb0892342c4196c177e6ea97cb68a85fb0aae8c010ab5a1c208"
+    "value": "24f53d93c82d644080ccaf67287d7674c66b0d2fecac07f15a6327626ec8df020b1f26472392417b75af97a7f7536dbd4c30866992d341f73f450c0c5e4fdb0c"
   }
 }

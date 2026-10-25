@@ -146,9 +146,10 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '6.1.2';
+const PLUGIN_VERSION = '7.1.0';
 
 function log(...args) {
+  try { ringPush(args); } catch {}
   try {
     if (typeof kino !== 'undefined' && kino.log) {
       kino.log(`[YojaTV v${PLUGIN_VERSION}]`, ...args);
@@ -156,12 +157,128 @@ function log(...args) {
   } catch {}
 }
 
+/* ---------- status reporting (YojaTV Status) ---------- */
+// Errors go to the status service (host declared in the manifest). Nothing is sent when the
+// "reportErrors" setting is off. Search text, API keys and tokens are masked before sending.
+const STATUS_API = 'https://yojatv-status.onrender.com';
+const REPORT_DEDUPE_MS = 10 * 60 * 1000;
+const LOG_RING_MAX = 80;
+const _logRing = [];
+const _seenReports = new Map();
+let _pendingReports = [];
+let _deviceId = null;
+
+function redact(s) {
+  return String(s)
+    .replace(/(api_key|apikey|token|access_token|key)=([^&\s"']+)/gi, '$1=***')
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+\/-]+=*/gi, '$1***')
+    .replace(/([?&](?:s|q|search|keyword|query)=)[^&\s"']*/gi, '$1***')
+    .replace(/(\/(?:buscar|search)\/)(?!suggest)[^\/?\s"']+/gi, '$1***')
+    .replace(/(query: ")[^"]*(")/gi, '$1***$2');
+}
+
+function ringPush(args) {
+  const line = args.map((a) => {
+    if (typeof a === 'string') return a;
+    if (a && a.stack) return String(a.stack);
+    try { return JSON.stringify(a); } catch { return String(a); }
+  }).join(' ');
+  _logRing.push(new Date().toISOString() + ' ' + redact(line).slice(0, 600));
+  if (_logRing.length > LOG_RING_MAX) _logRing.shift();
+}
+
+/** Fixed per install: created once, kept in kino.storage (survives restarts; gone on uninstall). */
+function deviceId() {
+  if (_deviceId) return _deviceId;
+  try {
+    let id = kino.storage.get('yt:did');
+    if (!id || !/^d-[0-9a-f-]{36}$/.test(id)) {
+      id = 'd-' + kino.crypto.uuid();
+      kino.storage.set('yt:did', id);
+    }
+    _deviceId = id;
+  } catch { _deviceId = 'd-unknown'; }
+  return _deviceId;
+}
+
+function reportingEnabled() {
+  try { return kino.config.get('reportErrors') !== false; } catch { return true; }
+}
+
+function reportError(kind, fn, err, extra) {
+  try {
+    if (!reportingEnabled()) return;
+    const e = (err && typeof err === 'object') ? err : { message: String(err || '') };
+    const x = extra || {};
+    const message = redact(e.message || 'error');
+    const fp = [kind, fn, x.source || '', x.host || '', x.status || '', message.slice(0, 120)].join('|');
+    const now = Date.now();
+    if (kind !== 'test') {
+      const last = _seenReports.get(fp);
+      if (last && now - last < REPORT_DEDUPE_MS) return;
+      if (_seenReports.size > 300) _seenReports.clear();
+      _seenReports.set(fp, now);
+    }
+    if (_pendingReports.length >= 12) return;
+    _pendingReports.push({
+      ts: now, kind, fn, message, code: e.code || undefined,
+      stack: e.stack ? redact(String(e.stack)).slice(0, 3000) : undefined,
+      source: x.source, host: x.host, status: x.status,
+      url: x.url ? redact(x.url).slice(0, 500) : undefined,
+      logs: _logRing.slice(-60), tries: 0
+    });
+  } catch {}
+}
+
+function reportHttp(method, url, status, err) {
+  try {
+    if (!(status === 0 || status >= 500 || status === 401 || status === 403 || status === 429)) return;
+    let host = '';
+    try { host = String(url).replace(/^[a-z]+:\/\//i, '').split(/[\/?#]/)[0].toLowerCase(); } catch {}
+    reportError('http', method, err || new Error(status ? 'HTTP ' + status : 'Fallo de red'), { url, status, host });
+  } catch {}
+}
+
+/** Sends what is queued. Never throws. Returns true when the service accepted it. */
+async function flushReports() {
+  if (!_pendingReports.length) return true;
+  const batch = _pendingReports;
+  _pendingReports = [];
+  try {
+    const res = await kino.fetch(STATUS_API + '/api/report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        v: 1, deviceId: deviceId(), pluginId: 'yoja-tv-kino', pluginVersion: PLUGIN_VERSION,
+        ui: kino.device || 'unknown', lang: kino.lang || '', errors: batch
+      }),
+      timeoutMs: 2500, cookies: false
+    });
+    if (res && res.ok) return true;
+  } catch {}
+  for (const r of batch) { r.tries++; if (r.tries < 3 && _pendingReports.length < 12) _pendingReports.push(r); }
+  return false;
+}
+
+function wrapExport(name, fn) {
+  return async function (...args) {
+    const t0 = Date.now();
+    try { return await fn.apply(this, args); }
+    catch (e) {
+      if (!(e && e.code === 'not_found')) reportError('export', name, e);
+      throw e;
+    } finally {
+      if (_pendingReports.length && Date.now() - t0 < 11000) await flushReports();
+    }
+  };
+}
+
 log(`Iniciando plugin YojaTV v${PLUGIN_VERSION} - Por JuandreXter, YojanderGaming y einer_bg`);
 
 // Kino allows at most 60 kino.fetch per plugin call; count ours so the catalog enrichment
 // stops before the engine rejects everything else in the same call.
-let FETCH_BUDGET = 60;
-function fetchBudgetReset() { FETCH_BUDGET = 60; }
+let FETCH_BUDGET = 58; // 2 reserved for the status reporter
+function fetchBudgetReset() { FETCH_BUDGET = 58; }
 
 const SOURCE_CACHE_TTL_MS = 5 * 60 * 1000;
 const _sourceSearchCache = new Map();
@@ -256,6 +373,7 @@ async function fetchText(url, headers, timeoutMs) {
     const res = await kino.fetch(url, opts);
     if (!res.ok) {
       log(`[HTTP GET FAIL] ${res.status} <- ${url}`);
+      reportHttp('GET', url, res.status);
       return { ok: false, status: res.status, text: '' };
     }
     const txt = getText(res);
@@ -263,6 +381,7 @@ async function fetchText(url, headers, timeoutMs) {
     return { ok: true, status: res.status, text: txt, url: res.url };
   } catch (e) {
     log(`[HTTP GET ERROR] ${e ? e.message : e} <- ${url}`);
+    reportHttp('GET', url, 0, e);
     return { ok: false, status: 0, text: '', error: e };
   }
 }
@@ -288,12 +407,14 @@ async function postForm(url, form, headers) {
     });
     if (!res.ok) {
       log(`[HTTP POST FAIL] ${res.status} <- ${url}`);
+      reportHttp('POST', url, res.status);
       return null;
     }
     log(`[HTTP POST OK] ${res.status} <- ${url}`);
     return res;
   } catch (e) {
     log(`[HTTP POST ERROR] ${e ? e.message : e} <- ${url}`);
+    reportHttp('POST', url, 0, e);
     return null;
   }
 }
@@ -308,12 +429,14 @@ async function postJson(url, obj, headers) {
     });
     if (!res.ok) {
       log(`[HTTP POST JSON FAIL] ${res.status} <- ${url}`);
+      reportHttp('POST', url, res.status);
       return null;
     }
     log(`[HTTP POST JSON OK] ${res.status} <- ${url}`);
     return res;
   } catch (e) {
     log(`[HTTP POST JSON ERROR] ${e ? e.message : e} <- ${url}`);
+    reportHttp('POST', url, 0, e);
     return null;
   }
 }
@@ -993,7 +1116,20 @@ async function resolveEmbedUrl(embedUrl, referer) {
 
 const SOURCES = {};
 
-function registerSource(src) { SOURCES[src.id] = src; }
+function registerSource(src) {
+  for (const k of Object.keys(src)) {
+    const f = src[k];
+    if (typeof f !== 'function' || Object.prototype.toString.call(f) !== '[object AsyncFunction]') continue;
+    src[k] = async function (...a) {
+      try { return await f.apply(this, a); }
+      catch (e) {
+        if (!(e && e.code === 'not_found')) reportError('source', k, e, { source: src.id });
+        throw e;
+      }
+    };
+  }
+  SOURCES[src.id] = src;
+}
 
 /* --- VPO (ver-peliculas-online.net) --- */
 registerSource({
@@ -3363,7 +3499,7 @@ function mergeAndRank(results, query) {
 
 /* ---------- exports ---------- */
 
-export async function search(params) {
+async function search(params) {
   await kino.sleep(0);
   fetchBudgetReset();
   let query = '';
@@ -3410,7 +3546,7 @@ export async function search(params) {
   return results;
 }
 
-export async function home() {
+async function home() {
   await kino.sleep(0);
   fetchBudgetReset();
   log('[home] loading rows');
@@ -3452,7 +3588,7 @@ export async function home() {
   return rows;
 }
 
-export async function section(param) {
+async function section(param) {
   await kino.sleep(0);
   fetchBudgetReset();
   let selectedTab = 'peliculas';
@@ -3545,7 +3681,7 @@ export async function section(param) {
   return { tabs, tab: selectedTab, hero, rows };
 }
 
-export async function details(ref) {
+async function details(ref) {
   const raw = typeof ref === 'string' ? ref : '';
   if (!raw) return null;
   let item = null;
@@ -3576,7 +3712,7 @@ export async function details(ref) {
   };
 }
 
-export async function liveCategories() {
+async function liveCategories() {
   const catalog = await liveCatalog();
   // No expose the native TDT playlist: Kino preserves its embedded logos,
   // including branding from unrelated plugins. The normalized catalog below
@@ -3584,7 +3720,7 @@ export async function liveCategories() {
   return catalog.map((category) => ({ id: category.id, title: category.title, genre: 'otros' }));
 }
 
-export async function liveChannels(arg) {
+async function liveChannels(arg) {
   const catalog = await liveCatalog();
   const categoryId = arg && typeof arg.categoryId === 'string' ? arg.categoryId : '';
   const category = catalog.find((item) => item.id === categoryId);
@@ -3594,7 +3730,7 @@ export async function liveChannels(arg) {
   return { items: page, next: offset + page.length < category.items.length ? String(offset + page.length) : null };
 }
 
-export async function liveSearch(arg) {
+async function liveSearch(arg) {
   const query = String(arg && arg.query || '').trim().toLowerCase();
   if (!query) return { items: [], next: null };
   const catalog = await liveCatalog();
@@ -3608,7 +3744,7 @@ export async function liveSearch(arg) {
   return { items, next: null };
 }
 
-export async function categories() {
+async function categories() {
   await kino.sleep(0);
   fetchBudgetReset();
   log('[categories] returning categories list');
@@ -3621,7 +3757,7 @@ export async function categories() {
   ];
 }
 
-export async function settingsStatus() {
+async function settingsStatus() {
   const kt = typeof kino.tmdb === 'function';
   const hasKey = !!tmdbKey();
   const ready = kt || hasKey;
@@ -3631,10 +3767,11 @@ export async function settingsStatus() {
   lines.push(ready ? (kt ? 'Catálogo TMDB activo · llave de Kino (' + lang + ')' : 'Catálogo TMDB activo (' + lang + ')') : 'Sin API key de TMDB: el catálogo usa solo las fuentes');
   lines.push(src ? 'Filas de fuentes: activadas' : 'Filas de fuentes: ocultas');
   lines.push(ready ? (kt ? 'Búsqueda enriquecida con TMDb (sin llave propia)' : 'Búsqueda enriquecida con TMDb') : 'Pega tu API key para mejorar el catálogo');
+  lines.push(reportingEnabled() ? 'Reporte de errores: activado · ID ' + deviceId().slice(2, 10) : 'Reporte de errores: desactivado');
   return { estado: lines.join(' · ') };
 }
 
-export async function action(key) {
+async function action(key) {
   await kino.sleep(0);
   if (key === 'clearCache') {
     let n = 0;
@@ -3647,6 +3784,12 @@ export async function action(key) {
     log(`[action] clearCache removed ${n} tmdb entries`);
     return { message: 'Caché de TMDB limpia (' + n + ' entradas)' };
   }
+  if (key === 'testReport') {
+    if (!reportingEnabled()) return { message: 'El reporte de errores está desactivado' };
+    reportError('test', 'testReport', new Error('Reporte de prueba desde Ajustes'));
+    const ok = await flushReports();
+    return { message: ok ? 'Enviado ✓ · ID ' + deviceId().slice(2, 10) : 'No se pudo contactar el servicio de estado' };
+  }
   if (key === 'testTmdb') {
     const kt = typeof kino.tmdb === 'function';
     if (!kt && !tmdbKey()) return { message: 'Falta la API key de TMDB' };
@@ -3657,7 +3800,7 @@ export async function action(key) {
   return null;
 }
 
-export async function validateSettings(values) {
+async function validateSettings(values) {
   if (!values || typeof values !== 'object') return null;
   const lang = typeof values.tmdbLang === 'string' ? values.tmdbLang.trim() : '';
   if (lang && !/^[a-z]{2}(-[A-Za-z]{2,4})?$/.test(lang)) return { tmdbLang: 'Usa un código como es-MX o en-US' };
@@ -3720,7 +3863,7 @@ function ownMigrateId(srcId, ref) {
   return sanitizeId(slug, srcId) || sanitizeId(path, srcId);
 }
 
-export async function migrate(input) {
+async function migrate(input) {
   await kino.sleep(0);
   fetchBudgetReset();
   if (!input || typeof input !== 'object') return null;
@@ -3761,7 +3904,7 @@ export async function migrate(input) {
   return null;
 }
 
-export async function browse(ref, cursor) {
+async function browse(ref, cursor) {
   await kino.sleep(0);
   fetchBudgetReset();
   if (ref && typeof ref === 'object') { // compat: { ref, cursor }
@@ -3853,7 +3996,7 @@ export async function browse(ref, cursor) {
   return { items: [], next: null };
 }
 
-export async function episodes(params) {
+async function episodes(params) {
   await kino.sleep(0);
   fetchBudgetReset();
   let ref = '';
@@ -3912,7 +4055,7 @@ async function resolveOneRef(ref) {
   return stream && stream.url ? stream : null;
 }
 
-export async function resolve(params) {
+async function resolve(params) {
   const startedAt = Date.now();
   await kino.sleep(0);
   fetchBudgetReset();
@@ -4081,7 +4224,7 @@ function nextSpeed(cur) {
   return cycle[(i + 1) % cycle.length] || 1;
 }
 
-export async function panel(context) {
+async function panel(context) {
   await kino.sleep(0);
   const ctx = context || {};
   const playing = (ctx.playing && ctx.playing.label) ? String(ctx.playing.label) : '';
@@ -4148,7 +4291,7 @@ export async function panel(context) {
   return { title: String(ctx.title || '').slice(0, 60), accent: '#FF6B00', refreshMs: 10000, elements };
 }
 
-export async function panelAction(event, context) {
+async function panelAction(event, context) {
   await kino.sleep(0);
   const e = event || {};
   const ctx = context || {};
@@ -4177,10 +4320,31 @@ export async function panelAction(event, context) {
   return null;
 }
 
-export async function playerEvent(event) {
+async function playerEvent(event) {
   try {
     const t = event && event.type;
     if (t) log(`[playerEvent] ${t}${event.label ? ' · ' + String(event.label).slice(0, 48) : ''}${event.kind ? ' (' + event.kind + ')' : ''}`);
   } catch {}
   return null;
 }
+
+/* ---------- exports (wrapped for error reporting) ---------- */
+const _x_search = wrapExport('search', search);
+const _x_home = wrapExport('home', home);
+const _x_section = wrapExport('section', section);
+const _x_details = wrapExport('details', details);
+const _x_liveCategories = wrapExport('liveCategories', liveCategories);
+const _x_liveChannels = wrapExport('liveChannels', liveChannels);
+const _x_liveSearch = wrapExport('liveSearch', liveSearch);
+const _x_categories = wrapExport('categories', categories);
+const _x_settingsStatus = wrapExport('settingsStatus', settingsStatus);
+const _x_action = wrapExport('action', action);
+const _x_validateSettings = wrapExport('validateSettings', validateSettings);
+const _x_migrate = wrapExport('migrate', migrate);
+const _x_browse = wrapExport('browse', browse);
+const _x_episodes = wrapExport('episodes', episodes);
+const _x_resolve = wrapExport('resolve', resolve);
+const _x_panel = wrapExport('panel', panel);
+const _x_panelAction = wrapExport('panelAction', panelAction);
+const _x_playerEvent = wrapExport('playerEvent', playerEvent);
+export { _x_search as search, _x_home as home, _x_section as section, _x_details as details, _x_liveCategories as liveCategories, _x_liveChannels as liveChannels, _x_liveSearch as liveSearch, _x_categories as categories, _x_settingsStatus as settingsStatus, _x_action as action, _x_validateSettings as validateSettings, _x_migrate as migrate, _x_browse as browse, _x_episodes as episodes, _x_resolve as resolve, _x_panel as panel, _x_panelAction as panelAction, _x_playerEvent as playerEvent };
