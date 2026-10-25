@@ -1,10 +1,10 @@
 {
   "id": "yoja-tv-kino",
   "name": "YojaTV-alpha",
-  "version": "8.0.1",
+  "version": "8.0.0",
   "apiVersion": 11,
   "entry": "plugin.js",
-  "description": "Plugin de YojaTV para Kino TV. Pel\u00c3\u00adculas de cine en espa\u00c3\u00b1ol latino, series y anime. Creado por JuandreXter, YojanderGaming y einer_bg.",
+  "description": "Plugin de YojaTV para Kino TV. Películas de cine en español latino, series y anime. Creado por JuandreXter, YojanderGaming y einer_bg.",
   "author": "JuandreXter, YojanderGaming, einer_bg",
   "homepage": "https://github.com/YojaTV-kino/YojaTV_plugin",
   "browser": "pages",
@@ -25,99 +25,148 @@
       "label": "API Key de TMDB",
       "labelEn": "TMDB API key",
       "type": "password",
-      "hint": "Opcional. Gratis en themoviedb.org \u00e2\u2013\u00b8 Settings \u00e2\u2013\u00b8 API",
-      "hintEn": "Optional. Free at themoviedb.org \u00e2\u2013\u00b8 Settings \u00e2\u2013\u00b8 API"
+      "hint": "Opcional. Gratis en themoviedb.org ▸ Settings ▸ API",
+      "hintEn": "Optional. Free at themoviedb.org ▸ Settings ▸ API"
     },
     {
       "key": "tmdbLang",
-      "label": "Idioma del cat\u00c3\u00a1logo",
+      "label": "Idioma del catálogo",
       "labelEn": "Catalog language",
       "type": "select",
       "default": "es-MX",
       "options": [
         {
           "value": "es-MX",
-          "label": "Espa\u00c3\u00b1ol (Latinoam\u00c3\u00a9rica)"
+          "label": "Español (Latinoamérica)",
+          "labelEn": "Spanish (Latin America)"
         },
         {
           "value": "es-ES",
-          "label": "Espa\u00c3\u00b1ol (Espa\u00c3\u00b1a)"
+          "label": "Español (España)",
+          "labelEn": "Spanish (Spain)"
         },
         {
           "value": "en-US",
-          "label": "English"
+          "label": "English",
+          "labelEn": "English"
+        },
+        {
+          "value": "pt-BR",
+          "label": "Português",
+          "labelEn": "Portuguese"
         }
       ]
     },
     {
-      "key": "hideSourceRows",
-      "label": "Filas de fuentes",
+      "key": "sourceRows",
+      "label": "Filas de las fuentes",
       "labelEn": "Source rows",
-      "type": "select",
-      "default": "show",
-      "options": [
-        {
-          "value": "show",
-          "label": "Mostrar todas"
-        },
-        {
-          "value": "hide",
-          "label": "Ocultar todas"
-        },
-        {
-          "value": "hide-some",
-          "label": "Ocultar menos usadas"
-        }
-      ]
+      "type": "toggle",
+      "default": false,
+      "hint": "Muestra las filas de cada fuente en Inicio",
+      "hintEn": "Shows each source's rows on Home"
     },
     {
-      "key": "enableTmdbEnrichment",
-      "label": "Enriquecimiento con TMDb",
-      "labelEn": "TMDb enrichment",
+      "key": "reportErrors",
+      "label": "Enviar reportes de errores",
+      "labelEn": "Send error reports",
       "type": "toggle",
       "default": true,
-      "hint": "Mejora portadas, sinopsis y b\u00c3\u00basqueda con datos de TMDb",
-      "hintEn": "Improves posters, overview and search using TMDb"
+      "hint": "Envía errores y registros a la página de estado, con un ID anónimo",
+      "hintEn": "Sends errors and logs to the status page with an anonymous ID"
     },
     {
-      "key": "enableErrorReporting",
-      "label": "Reporte de errores",
-      "labelEn": "Error reporting",
-      "type": "toggle",
-      "default": true,
-      "hint": "Env\u00c3\u00ada fallos an\u00c3\u00b3nimos para mejorar el plugin",
-      "hintEn": "Sends anonymous failures to help improve the plugin"
+      "key": "estado",
+      "label": "Estado",
+      "labelEn": "Status",
+      "type": "status"
+    },
+    {
+      "key": "clearCache",
+      "label": "Limpiar caché del catálogo",
+      "labelEn": "Clear catalog cache",
+      "type": "action",
+      "confirm": "¿Borrar la caché de TMDB del catálogo?",
+      "confirmEn": "Delete the TMDB catalog cache?"
+    },
+    {
+      "key": "testTmdb",
+      "label": "Probar conexión con TMDB",
+      "labelEn": "Test TMDB connection",
+      "type": "action"
+    },
+    {
+      "key": "testReport",
+      "label": "Enviar reporte de prueba",
+      "labelEn": "Send test report",
+      "type": "action"
     },
     {
       "key": "showDeviceId",
       "label": "Ver ID del dispositivo",
       "labelEn": "Show device ID",
-      "type": "action",
-      "action": "showDeviceId",
-      "hint": "Muestra el ID corto de este dispositivo",
-      "hintEn": "Show this device's short ID"
+      "type": "action"
     }
   ],
-  "actions": [
+  "settingsLayout": [
     {
-      "id": "showDeviceId",
-      "type": "settingsStatus",
-      "key": "showDeviceId"
+      "type": "card",
+      "title": "Catálogo",
+      "titleEn": "Catalog",
+      "children": [
+        {
+          "setting": "tmdbKey"
+        },
+        {
+          "setting": "tmdbLang"
+        },
+        {
+          "setting": "sourceRows"
+        }
+      ]
+    },
+    {
+      "type": "card",
+      "title": "Diagnóstico",
+      "titleEn": "Diagnostics",
+      "children": [
+        {
+          "setting": "reportErrors"
+        },
+        {
+          "setting": "estado"
+        },
+        {
+          "setting": "clearCache"
+        },
+        {
+          "setting": "testTmdb"
+        },
+        {
+          "setting": "testReport"
+        },
+        {
+          "setting": "showDeviceId"
+        }
+      ]
     }
   ],
+  "section": {
+    "label": "YojaTV",
+    "labelEn": "YojaTV"
+  },
+  "theme": {
+    "accent": "#FF6B00",
+    "onAccent": "#000000",
+    "background": "#0B0F19",
+    "surface": "#161D2F",
+    "highlight": "#F5F5F5"
+  },
   "categories": [
     "movies",
     "series",
     "anime",
     "live"
-  ],
-  "icon": "icon.png",
-  "signature": {
-    "authorKey": "c3caf0f9e51197553082904a2655d51e5afcca579a3048cdfbd8a97f7b2cf2c3",
-    "value": "36a6f144e5dab0c0b9d323c636312672b6138e570516ada0955852aea32c7cc7e69446eb4a5ca3dc22d35cb0de88f4cb23d1c685829bbbf606c9c83adba5c30f"
-  },
-  "hosts": [
-    "example.com"
   ],
   "capabilities": [
     "search",
@@ -125,6 +174,169 @@
     "browse",
     "episodes",
     "resolve",
-    "channels"
-  ]
+    "channels",
+    "download",
+    "migrate",
+    "scopedSearch"
+  ],
+  "hosts": [
+    "ver-peliculas-online.net",
+    "www.ver-peliculas-online.net",
+    "jkanime.net",
+    "www.jkanime.net",
+    "cdn.jkdesa.com",
+    "www.cinecalidad.am",
+    "cinecalidad.am",
+    "www.hackstore.fo",
+    "hackstore.fo",
+    "cinehdplus.org",
+    "www.cinehdplus.org",
+    "api.cinehdplus.org",
+    "cinehax.com",
+    "www.cinehax.com",
+    "sololatino.net",
+    "www.sololatino.net",
+    "pelisgratishds.com",
+    "www.pelisgratishds.com",
+    "cdn.pelistop.com",
+    "embed.pelisgratishd.lat",
+    "directyp.org",
+    "cuevanaserie.pro",
+    "www.cuevanaserie.pro",
+    "cuevana-3.page",
+    "vids.vidplayz.site",
+    "i1.wp.com",
+    "entrepeliculasyseries.nz",
+    "www.entrepeliculasyseries.nz",
+    "animeav1.com",
+    "cdn.animeav1.com",
+    "animeflv.or.at",
+    "www.animeflv.or.at",
+    "www.tdtchannels.com",
+    "tdtchannels.com",
+    "raw.githubusercontent.com",
+    "net79.cc",
+    "www.net79.cc",
+    "onlyflix.to",
+    "www.onlyflix.to",
+    "www.pelisplushd.la",
+    "pelisplushd.la",
+    "1movies.stream",
+    "www.1movies.stream",
+    "pluto.tv",
+    "boot.pluto.tv",
+    "service-media-search.clusters.pluto.tv",
+    "service-vod.clusters.pluto.tv",
+    "service-channels.clusters.pluto.tv",
+    "cfd-v4-service-channel-stitcher-use1-1.prd.pluto.tv",
+    "image.tmdb.org",
+    "api.themoviedb.org",
+    "mediafire.com",
+    "www.mediafire.com",
+    "mp4upload.com",
+    "www.mp4upload.com",
+    "voe.sx",
+    "www.voe.sx",
+    "*.voe.sx",
+    "goodstream.one",
+    "www.goodstream.one",
+    "*.goodstream.one",
+    "goodstream.uno",
+    "www.goodstream.uno",
+    "*.goodstream.uno",
+    "vimeos.net",
+    "www.vimeos.net",
+    "*.vimeos.net",
+    "vimeos.zip",
+    "*.vimeos.zip",
+    "filemoon.sx",
+    "*.filemoon.sx",
+    "videoapp.zip",
+    "www.videoapp.zip",
+    "doodstream.com",
+    "www.doodstream.com",
+    "embed69.org",
+    "www.embed69.org",
+    "player.pelisserieshoy.com",
+    "morencius.com",
+    "www.morencius.com",
+    "hglink.to",
+    "www.hglink.to",
+    "fotise.com",
+    "www.fotise.com",
+    "vidhidepro.com",
+    "www.vidhidepro.com",
+    "vidhidefast.com",
+    "www.vidhidefast.com",
+    "unlimplay.com",
+    "www.unlimplay.com",
+    "vimeos.unlimplay.com",
+    "nontongo.cc",
+    "www.nontongo.cc",
+    "vidhidevip.com",
+    "mixdrop.top",
+    "streamtape.com",
+    "sfastwish.com",
+    "dsvplay.com",
+    "d-s.io",
+    "mega.nz",
+    "bysekoze.com",
+    "player.zilla-networks.com",
+    "flixcloud.cc",
+    "boot.pluto.tv",
+    "embed.pelisgratishd.lat",
+    "*.pelisgratishd.lat",
+    "hakunaymatata.com",
+    "*.hakunaymatata.com",
+    "mfw09.org",
+    "*.mfw09.org",
+    "kaembed.net",
+    "*.kaembed.net",
+    "videasy.net",
+    "player.videasy.net",
+    "*.videasy.net",
+    "player.videasy.to",
+    "waaw.to",
+    "*.waaw.to",
+    "vidapi.xyz",
+    "*.vidapi.xyz",
+    "nontongo.stream",
+    "*.nontongo.stream",
+    "vidfast.vc",
+    "*.vidfast.vc",
+    "uqload.vc",
+    "*.uqload.vc",
+    "vidplayz.site",
+    "*.vidplayz.site",
+    "playmogo.com",
+    "*.playmogo.com",
+    "megankiddifference.com",
+    "*.megankiddifference.com",
+    "chaliceguzzlerlandlord.com",
+    "*.chaliceguzzlerlandlord.com",
+    "derricknationtop.com",
+    "*.derricknationtop.com",
+    "opuxa.lat",
+    "*.opuxa.lat",
+    "cuevanatv.vip",
+    "*.cuevanatv.vip",
+    "cuevana3to.com",
+    "*.cuevana3to.com",
+    "dramiyos-cdn.com",
+    "*.dramiyos-cdn.com",
+    "acek-cdn.com",
+    "*.acek-cdn.com",
+    "streamwish.to",
+    "*.streamwish.to",
+    "byselapuix.com",
+    "animeav1.uns.bio",
+    "callistanise.com",
+    "*.callistanise.com",
+    "yojatv-status.onrender.com"
+  ],
+  "icon": "icon.png",
+  "signature": {
+    "authorKey": "c3caf0f9e51197553082904a2655d51e5afcca579a3048cdfbd8a97f7b2cf2c3",
+    "value": "5ae4ac6b71b9f27ab909a2fd02dcae25f0fca351076e0d34a986ed8d96344099367a6817ee9de13b71d663c016c83730c5b41a94a343e647e48d3c703049aa0a"
+  }
 }
