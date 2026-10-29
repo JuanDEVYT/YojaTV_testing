@@ -1,0 +1,23 @@
+# Blueprint de Render: YojaTV-server.
+# Conecta el repositorio en Render → "New +" → "Blueprint" y toma este archivo; el servicio queda
+# llamado YojaTV-server, sirviendo en https://yojatv-server.onrender.com con la raíz en server/.
+services:
+  - type: web
+    name: YojaTV-server
+    runtime: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: node index.js
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: LOG_LEVEL
+        value: info
+      - key: PER_REF_TIMEOUT_MS
+        value: "9000"
+      - key: REQUEST_TIMEOUT_MS
+        value: "14000"
+      - key: MAX_NEW
+        value: "4"
