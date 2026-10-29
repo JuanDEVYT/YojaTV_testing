@@ -1,7 +1,7 @@
 {
   "id": "yoja-tv-kino",
   "name": "YojaTV-alpha",
-  "version": "8.0.1",
+  "version": "8.1.0",
   "apiVersion": 11,
   "entry": "plugin.js",
   "description": "Plugin de YojaTV para Kino TV. Películas de cine en español latino, series y anime. Creado por JuandreXter, YojanderGaming y einer_bg.",
@@ -177,7 +177,11 @@
     "channels",
     "download",
     "migrate",
-    "scopedSearch"
+    "scopedSearch",
+    "nuvio"
+  ],
+  "nuvioRepos": [
+    "D3adlyRocket/All-in-One-Nuvio"
   ],
   "hosts": [
     "ver-peliculas-online.net",
@@ -187,8 +191,6 @@
     "cdn.jkdesa.com",
     "www.cinecalidad.am",
     "cinecalidad.am",
-    "www.hackstore.fo",
-    "hackstore.fo",
     "cinehdplus.org",
     "www.cinehdplus.org",
     "api.cinehdplus.org",
@@ -201,11 +203,6 @@
     "cdn.pelistop.com",
     "embed.pelisgratishd.lat",
     "directyp.org",
-    "cuevanaserie.pro",
-    "www.cuevanaserie.pro",
-    "cuevana-3.page",
-    "vids.vidplayz.site",
-    "i1.wp.com",
     "entrepeliculasyseries.nz",
     "www.entrepeliculasyseries.nz",
     "animeav1.com",
@@ -219,8 +216,6 @@
     "www.net79.cc",
     "onlyflix.to",
     "www.onlyflix.to",
-    "www.pelisplushd.la",
-    "pelisplushd.la",
     "1movies.stream",
     "www.1movies.stream",
     "pluto.tv",
@@ -332,11 +327,17 @@
     "animeav1.uns.bio",
     "callistanise.com",
     "*.callistanise.com",
+    "api.framextv.tech",
+    "framextv.tech",
+    "enc-dec.app",
+    "vidlink.pro",
+    "mg.homelabx.qzz.io",
+    "yojatv-server.onrender.com",
     "yojatv-status.onrender.com"
   ],
   "icon": "icon.png",
   "signature": {
     "authorKey": "c3caf0f9e51197553082904a2655d51e5afcca579a3048cdfbd8a97f7b2cf2c3",
-    "value": "36a6f144e5dab0c0b9d323c636312672b6138e570516ada0955852aea32c7cc7e69446eb4a5ca3dc22d35cb0de88f4cb23d1c685829bbbf606c9c83adba5c30f"
+    "value": "a60d721dac13557a44de2aa3a87d6d4eb7423362c606b57dd76c794cd526d9617597ced705623ac81878b0e1f0a49c2e19e4c8faf54b1f2c12b747762702c204"
   }
 }

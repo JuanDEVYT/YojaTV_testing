@@ -37,7 +37,8 @@ test('manifest is apiVersion 11 with browser pages', () => {
   assert.equal(manifest.section.label, 'YojaTV');
   assert.ok(manifest.panel && manifest.panel.iconFile, 'manifest must declare the player panel');
   assert.ok(Array.isArray(manifest.capabilities) && manifest.capabilities.includes('migrate'), 'migrate capability');
-  assert.ok(!manifest.capabilities.includes('nuvio'), 'nuvio stays disabled');
+  assert.ok(manifest.capabilities.includes('nuvio'), 'nuvio capability is enabled');
+  assert.ok(Array.isArray(manifest.nuvioRepos) && manifest.nuvioRepos.includes('D3adlyRocket/All-in-One-Nuvio'), 'nuvioRepos names the Nuvio repo');
   assert.ok(!manifest.capabilities.includes('externalResolve'), 'external resolve stays disabled');
   assert.ok(Array.isArray(manifest.settingsLayout) && manifest.settingsLayout.some((s) => s.type === 'card'), 'settingsLayout cards');
   assert.deepEqual(manifest.categories, ['movies', 'series', 'anime', 'live']);
@@ -142,93 +143,6 @@ test('kino.tmdb (Kino 0.9.53+): catalog and details with no person key', async (
     assert.equal(it.ids && it.ids.tmdb, 4242, 'items carry ids.tmdb');
     assert.ok(it.overview, 'items carry overview');
     assert.ok(sec.hero.image.includes('/w780/bk.jpg'), 'hero uses the TMDB backdrop');
-  } finally {
-    globalThis.kino = real;
-  }
-});
-
-// Fake kino.fetch answering a Hackstore page whose servers are vimeos + goodstream
-// (+ optionally voe). goodstreamHs: when true the goodstream embed NEVER answers,
-// reproducing the "server hangs and the whole resolve waited 15 s" stall.
-// vimeosProbeOk: the stream probe (GET, like the player) verdict for the vimeos m3u8.
-function hsFakeFetch({ vimeosProbeOk, goodstreamHs, withVoe }) {
-  const respond = (url, opts) => {
-    if (url.startsWith('https://www.hackstore.fo/peliculas/peli-falsa/')) {
-      return {
-        ok: true, status: 200, url,
-        text: () => '<a href="play.php?u=AAAA&b=BBBB">a</a><a href="play.php?u=CCCC&b=DDDD">b</a>' +
-          (withVoe ? '<a href="play.php?u=EEEE&b=FFFF">c</a>' : '')
-      };
-    }
-    if (url.includes('play.php?u=AAAA')) return { ok: true, status: 200, url, text: () => "<script>location.href='https://vimeos.net/embed-xyz.html'</script>" };
-    if (url.includes('play.php?u=CCCC')) return { ok: true, status: 200, url, text: () => "<script>location.href='https://goodstream.one/embed-xyz.html'</script>" };
-    if (url.includes('play.php?u=EEEE')) return { ok: true, status: 200, url, text: () => "<script>location.href='https://voe.sx/e/abc123'</script>" };
-    if (url.includes('vimeos.net/embed-xyz.html')) {
-      return { ok: true, status: 200, url, text: () => '<script>sources:["https://s1.vimeos.net/hls2/01/00001/xyz_,n,.urlset/master.m3u8?t=abc&s=1&e=2"]</script>' };
-    }
-    if (url.includes('vimeos.net/hls2')) {
-      return { ok: !!vimeosProbeOk, status: vimeosProbeOk ? 200 : 403, url, text: () => '' };
-    }
-    if (url.includes('goodstream.one/embed-xyz.html') && goodstreamHs) {
-      return new Promise(() => {}); // never answers: the old stall
-    }
-    if (url.includes('goodstream.one/embed-xyz.html')) {
-      return { ok: true, status: 200, url, text: () => '<script>file:"https://goodstream.one/dl/fake.mp4"</script>' };
-    }
-    if (url.includes('voe.sx/e/abc123')) {
-      return { ok: true, status: 200, url, text: () => 'sources:[{src:"https://fakecdn.example/v/master.m3u8"}]' };
-    }
-    return { ok: false, status: 404, url, text: () => '' };
-  };
-  return async (url, opts) => respond(url, opts);
-}
-
-test('early-exit collector: the healthy server wins and vimeos never becomes primary', async () => {
-  const real = globalThis.kino;
-  globalThis.kino = { ...real, fetch: hsFakeFetch({ vimeosProbeOk: true, goodstreamHs: true, withVoe: true }) };
-  try {
-    const t0 = Date.now();
-    const out = await Promise.race([
-      plugin.resolve({ ref: 'hs:peliculas:peli-falsa' }),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('resolve se quedó esperando al servidor colgado')), 12000))
-    ]);
-    const elapsed = Date.now() - t0;
-    assert.ok(out && out.url, 'resolve must return a stream');
-    assert.ok(out.url.includes('fakecdn.example'), 'the healthy non-vimeos server wins');
-    assert.ok(!out.url.includes('vimeos'), 'vimeos (player-403) must not win while another stream exists');
-    assert.ok(elapsed < 3000, 'must return the healthy embed quickly, took ' + elapsed + 'ms');
-  } finally {
-    globalThis.kino = real;
-  }
-});
-
-test('a vimeos stream whose manifest 403s on this device is skipped', async () => {
-  const real = globalThis.kino;
-  globalThis.kino = { ...real, fetch: hsFakeFetch({ vimeosProbeOk: false, goodstreamHs: false, withVoe: true }) };
-  try {
-    const out = await Promise.race([
-      plugin.resolve({ ref: 'hs:peliculas:peli-falsa' }),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('resolve demasiado lento')), 12000))
-    ]);
-    assert.ok(out && out.url, 'resolve must return a stream');
-    assert.ok(!out.url.includes('vimeos'), '403-ing vimeos must not be the primary');
-    const all = JSON.stringify(out);
-    assert.ok(!all.includes('vimeos.net'), 'nor an alternative');
-    assert.ok(out.url.includes('fakecdn.example') || out.url.includes('goodstream'), 'another server wins instead');
-  } finally {
-    globalThis.kino = real;
-  }
-});
-
-test('vimeos is still offered as the last resort when it is the only candidate', async () => {
-  const real = globalThis.kino;
-  globalThis.kino = { ...real, fetch: hsFakeFetch({ vimeosProbeOk: true, goodstreamHs: false, withVoe: false }) };
-  try {
-    const out = await Promise.race([
-      plugin.resolve({ ref: 'hs:peliculas:peli-falsa' }),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('resolve demasiado lento')), 12000))
-    ]);
-    assert.ok(out && out.url.includes('vimeos'), 'with no other stream, vimeos remains the last resort');
   } finally {
     globalThis.kino = real;
   }
@@ -672,23 +586,40 @@ test('TMDB episodes use Kino meta episodes before Net79', async () => {
 test('safe HLS resolve results are cached within the runtime', async () => {
   const real = globalThis.kino;
   let calls = 0;
+  const countIf = (url) => {
+    if (url.includes('cinehdplus.org')) calls++;
+  };
   globalThis.kino = {
     ...real,
     fetch: async (url) => {
-      calls++;
-      if (url.includes('cuevanaserie.pro') && url.includes('ver.html')) {
-        return { ok: true, status: 200, url, text: () => 'player.src({ src: "https://cdn.example/cached.m3u8" })' };
+      countIf(url);
+      if (url === 'https://cinehdplus.org/pelicula/batman/') {
+        return { ok: true, status: 200, url, text: () => '<iframe src="//api.cinehdplus.org/ir/player.php?h=abc"></iframe>' };
+      }
+      if (url.includes('player.php')) {
+        return { ok: true, status: 200, url, text: () => '<script>window.location.replace("goto.php?h=token123");</script>' };
+      }
+      if (url.includes('goto.php')) {
+        return { ok: true, status: 200, url, text: () => '<script>location.replace("https://api.cinehdplus.org/ir/rd.php?id=xyz");</script>' };
+      }
+      if (url.includes('rd.php')) {
+        return { ok: true, status: 200, url, text: () => '<iframe src="https://cdn.example/hls.m3u8"></iframe>' };
       }
       return { ok: false, status: 404, url, text: () => '' };
     }
   };
   try {
-    await plugin.resolve({ ref: 'cv:/peliculas/cache-test/' });
+    const ref = 'chp:movie:https://cinehdplus.org/pelicula/batman/';
+    await plugin.resolve({ ref });
     const first = calls;
-    await plugin.resolve({ ref: 'cv:/peliculas/cache-test/' });
+    assert.ok(first > 0, 'the first resolve fetched the source');
+    await plugin.resolve({ ref });
     assert.equal(calls, first, 'second resolve reuses the safe HLS stream cache');
-  } finally { globalThis.kino = real; }
+  } finally {
+    globalThis.kino = real;
+  }
 });
+
 
 test('Kino metadata series episodes produce directly resolvable Net79 refs', async () => {
   const real = globalThis.kino;
@@ -703,29 +634,6 @@ test('Kino metadata series episodes produce directly resolvable Net79 refs', asy
 });
 
 /* ---------- 6.0.2 fixes: Cuevana domain, SoloLatino storage CSRF, CineHDPlus redirects ---------- */
-
-test('cuevana resolve targets cuevanaserie.pro', async () => {
-  const real = globalThis.kino;
-  const requested = [];
-  globalThis.kino = {
-    ...real,
-    fetch: async (url) => {
-      requested.push(url);
-      if (url.includes('ver.html')) {
-        return { ok: true, status: 200, url, text: () => 'player.src({ src: "https://cdn.example/video.m3u8" })' };
-      }
-      return { ok: false, status: 404, url, text: () => '' };
-    }
-  };
-  try {
-    const st = await plugin.resolve({ ref: 'cv:/peliculas/batman-test/' });
-    assert.ok(st && st.url === 'https://cdn.example/video.m3u8');
-    assert.ok(requested.some((u) => u.startsWith('https://cuevanaserie.pro/')), 'cuevana must fetch from cuevanaserie.pro');
-    assert.ok(!requested.some((u) => u.includes('cuevana-3.page')), 'cuevana-3.page should not be used');
-  } finally {
-    globalThis.kino = real;
-  }
-});
 
 test('sololatino persists csrf state in storage across runs', async () => {
   const real = globalThis.kino;
@@ -793,18 +701,18 @@ test('merged ref resolves fast with early exit and lazy alternatives', async () 
     ...real,
     fetch: async (url) => {
       queried.push(url);
-      if (url.includes('ver.html')) {
-        return { ok: true, status: 200, url, text: () => 'player.src({ src: "https://fastcdn.example/play.m3u8" })' };
+      if (url.includes('entrepeliculasyseries.nz/pelicula/peli-rapida')) {
+        return { ok: true, status: 200, url, text: () => 'src="https://fastcdn.example/play.m3u8"' };
       }
       return { ok: false, status: 404, url, text: () => '' };
     }
   };
   try {
     const mgRef = 'mg:' + encodeURIComponent(JSON.stringify([
-      'cv:/peliculas/peli-rapida/',
-      'sl:pelicula:peli-rapida',
-      'hs:peliculas:peli-rapida',
-      'pgh:movie:peli-rapida'
+      'ent:/pelicula/peli-rapida/',
+      'av1:peli-rapida',
+      'afv:peli-rapida:1:https://fake.example/ep',
+      'vpo:movie:peli-rapida'
     ]));
     const t0 = Date.now();
     const st = await plugin.resolve({ ref: mgRef });
@@ -812,12 +720,14 @@ test('merged ref resolves fast with early exit and lazy alternatives', async () 
     assert.ok(st && st.url.includes('fastcdn.example'), 'first available source stream is returned');
     assert.ok(elapsed < 4000, 'resolve must exit early, took ' + elapsed + 'ms');
     assert.ok(Array.isArray(st.alternatives), 'alternatives are provided');
-    assert.ok(st.alternatives.some((a) => a.ref && a.ref.startsWith('hs:')), 'untried sources become lazy alternatives');
-    assert.ok(st.alternatives.some((a) => a.ref && a.ref.startsWith('pgh:')), 'untried sources become lazy alternatives');
+    assert.ok(st.alternatives.some((a) => a.ref && a.ref.startsWith('afv:')), 'untried sources become lazy alternatives');
+    assert.ok(st.alternatives.some((a) => a.ref && a.ref.startsWith('vpo:')), 'untried sources become lazy alternatives');
+    assert.ok(queried.some((u) => u.includes('entrepeliculasyseries.nz')), 'the merged ref asks the first source');
   } finally {
     globalThis.kino = real;
   }
 });
+
 
 test('live sources expose native TDT playlist and cached IPTV categories', async () => {
   assert.ok(manifest.capabilities.includes('channels'), 'channels capability');

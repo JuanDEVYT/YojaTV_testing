@@ -146,7 +146,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '8.0.1';
+const PLUGIN_VERSION = '8.1.0';
 
 function log(...args) {
   try { ringPush(args); } catch {}
@@ -1585,113 +1585,6 @@ registerSource({
   }
 });
 
-/* --- HACKSTORE --- */
-registerSource({
-  id: 'hs',
-  label: 'Hackstore',
-  kind: 'movie',
-  async search(q) {
-    const r = await fetchText('https://www.hackstore.fo/?s=' + encodeURIComponent(q));
-    if (!r.ok) return [];
-    const items = [];
-    const seen = new Set();
-    const re = /<a[^>]+href="https:\/\/www\.hackstore\.fo\/(peliculas|series|animes)\/([^"\/]+)\/"[^>]*title="([^"]+)"/g;
-    let m;
-    while ((m = re.exec(r.text)) !== null) {
-      const cat = m[1];
-      const slug = m[2];
-      const type = cat === 'series' ? 'series' : 'movie';
-      const id = sanitizeId(slug, 'hs');
-      if (seen.has(id)) continue;
-      seen.add(id);
-      const poster = extractCardPoster(r.text, m.index, 'https://www.hackstore.fo');
-      items.push({ id, ref: 'hs:' + cat + ':' + slug, title: cleanText(m[3]) || slugToTitle(slug), kind: type, poster: poster || null });
-    }
-    return items;
-  },
-  async home() {
-    const r = await fetchText('https://www.hackstore.fo/');
-    if (!r.ok) return [];
-    const items = [];
-    const seen = new Set();
-    const re = /<a[^>]+href="https:\/\/www\.hackstore\.fo\/(peliculas|series|animes)\/([^"\/]+)\/"[^>]*title="([^"]+)"/g;
-    let m;
-    while ((m = re.exec(r.text)) !== null) {
-      const cat = m[1];
-      const slug = m[2];
-      const type = cat === 'series' ? 'series' : 'movie';
-      const id = sanitizeId(slug, 'hs');
-      if (seen.has(id)) continue;
-      seen.add(id);
-      const poster = extractCardPoster(r.text, m.index, 'https://www.hackstore.fo');
-      const yearM = /\((\d{4})\)/.exec(m[3]);
-      items.push({ id, ref: 'hs:' + cat + ':' + slug, title: cleanText(m[3]) || slugToTitle(slug), kind: type, poster: poster || null, year: yearM ? yearM[1] : null, badges: ['ESTRENO'] });
-    }
-    return items;
-  },
-  async resolve(path) {
-    const lz = lazyEmbedOf(path);
-    const base = lz ? path.slice(0, path.indexOf('|u=')) : path;
-    const [cat, slug] = base.split(':');
-    const detailUrl = 'https://www.hackstore.fo/' + cat + '/' + slug + '/';
-
-    async function resolvePlay(playUrl) {
-      const p = await fetchText(playUrl, { Referer: detailUrl });
-      if (!p.ok) return null;
-      const locM = /location\.href\s*=\s*['"]([^'"]+)['"]/i.exec(p.text);
-      const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(p.text);
-      const target = locM ? locM[1] : (iframeM ? iframeM[1] : null);
-      if (!target) {
-        // Inline player — try packed JS extraction
-        const unpacked = extractPackedJs(p.text);
-        const m3u = (unpacked || p.text).match(/(https?:\/\/[^"'\s\\]+\.m3u8[^"'\s\\]*)/i);
-        if (m3u) return { url: m3u[1], headers: { 'User-Agent': UA, 'Referer': detailUrl } };
-        return null;
-      }
-      // Use resolveEmbedUrl: handles vimeos, videoapp.zip→vimeos, voe.sx redirect, etc.
-      return resolveEmbedUrl(target.startsWith('//') ? 'https:' + target : target, playUrl);
-    }
-
-    if (lz) {
-      const st = await resolvePlay(lz);
-      return st && st.url ? { url: st.url, ...(st.headers ? { headers: st.headers } : {}) } : null;
-    }
-    const r = await fetchText(detailUrl);
-    if (!r.ok) return null;
-
-    const playMatches = [];
-    const playRe = /play\.php\?u=([^&"'\s<>]+)&b=([^&"'\s<>]+)/g;
-    let pm;
-    while ((pm = playRe.exec(r.text)) !== null) {
-      const u = 'https://www.hackstore.fo/play.php?u=' + pm[1] + '&b=' + pm[2];
-      if (!playMatches.includes(u)) playMatches.push(u);
-    }
-    if (playMatches.length === 0) return null;
-
-    const state = new Map();
-    const head = await settledWithGrace(playMatches.slice(0, 3).map((pu) => resolvePlay(pu).then((st) => ({ pu, st }), () => ({ pu, st: null }))));
-    const ok = [];
-    head.forEach((r) => { if (r === undefined) return; if (r.st && r.st.url) { ok.push({ ...r.st, pu: r.pu }); state.set(r.pu, 'ok'); } else state.set(r.pu, 'fail'); });
-    if (!ok.length) {
-      for (const pu of playMatches.slice(3)) {
-        const st = await resolvePlay(pu).catch(() => null);
-        if (st && st.url) { ok.push({ ...st, pu }); state.set(pu, 'ok'); break; }
-        state.set(pu, 'fail');
-      }
-    }
-    for (const pu of playMatches) if (!state.has(pu)) state.set(pu, 'untried');
-    if (ok.length === 0) return null;
-    ok.sort((a, b) => streamScore(a.url) - streamScore(b.url));
-    const eagerAlts = ok.slice(1, 4).map((s, i) => ({ label: embedLabel(s.pu, i), url: s.url, ...(s.headers ? { headers: s.headers } : {}) }));
-    const alts = [...eagerAlts, ...lazyAltsFrom(playMatches, state, path)];
-    return {
-      url: ok[0].url,
-      ...(ok[0].headers ? { headers: ok[0].headers } : {}),
-      ...(alts.length > 0 ? { alternatives: alts } : {})
-    };
-  }
-});
-
 /* --- CINEHDPLUS --- */
 registerSource({
   id: 'chp',
@@ -2129,117 +2022,6 @@ registerSource({
     };
   }
 
-});
-
-/* --- CUEVANASERIE --- */
-registerSource({
-  id: 'cv',
-  label: 'CuevanaSerie',
-  kind: 'movie',
-  async search(q) {
-    const r = await fetchText('https://cuevanaserie.pro/search/' + encodeURIComponent(q));
-    if (!r.ok) return [];
-    const items = [];
-    const seen = new Set();
-    const re = /<div class="movie-item"><a href="(\/(?:peliculas|tv)\/([^"\/]+)\/)"/g;
-    let m;
-    while ((m = re.exec(r.text)) !== null) {
-      const path = m[1];
-      const slug = m[2];
-      const type = path.startsWith('/tv/') ? 'series' : 'movie';
-      const id = sanitizeId(slug, 'cv');
-      if (seen.has(id)) continue;
-      seen.add(id);
-      const block = r.text.slice(m.index, m.index + 900);
-      const titleM = /alt="([^"]+)"/.exec(block);
-      const imgM = /src=(https?:\/\/[^ ]+)/.exec(block);
-      const yearM = /<span class="year[^>]*>(\d{4})<\/span>/.exec(block);
-      items.push({ id, ref: 'cv:' + path, title: cleanText(titleM ? titleM[1] : '') || slugToTitle(slug), kind: type, poster: imgM ? imgM[1] : null, year: yearM ? yearM[1] : null });
-    }
-    return items;
-  },
-  async home() {
-    const r = await fetchText('https://cuevanaserie.pro/');
-    if (!r.ok) return [];
-    const items = [];
-    const seen = new Set();
-    const re = /<div class="movie-item">\s*<a href="(\/(?:peliculas|tv)\/[^"]+\/)">/g;
-    let m;
-    while ((m = re.exec(r.text)) !== null) {
-      const path = m[1];
-      const slug = path.split('/').filter(Boolean).pop();
-      const type = path.startsWith('/tv/') ? 'series' : 'movie';
-      const id = sanitizeId(slug, 'cv');
-      if (seen.has(id)) continue;
-      seen.add(id);
-      const block = r.text.slice(m.index, m.index + 900);
-      const titleM = /alt="([^"]+)"/.exec(block);
-      const imgM = /src=(https?:\/\/[^ ]+)/.exec(block);
-      items.push({ id, ref: 'cv:' + path, title: cleanText(titleM ? titleM[1] : '') || slugToTitle(slug), kind: type, poster: imgM ? imgM[1] : null });
-    }
-    return items;
-  },
-  async episodes(path) {
-    // path = "/tv/<id>/<slug>/"
-    const r = await fetchText('https://cuevanaserie.pro' + path);
-    if (!r.ok) return { episodes: [] };
-    const list = [];
-    const epRe = /href="(\/tv\/[^"]+\/episodio[^"]*)"[^>]*>[^<]*<[^>]*>([^<]+)</g;
-    let m;
-    const seen = new Set();
-    while ((m = epRe.exec(r.text)) !== null) {
-      if (seen.has(m[1])) continue;
-      seen.add(m[1]);
-      list.push({ number: list.length + 1, season: 1, title: cleanText(m[2]) || ('Episodio ' + (list.length + 1)), ref: 'cv:' + m[1] });
-    }
-    if (list.length === 0) {
-      const altRe = /href="(\/tv\/[^"]+\/(\d+)x(\d+)[^"]*)"/g;
-      while ((m = altRe.exec(r.text)) !== null) {
-        if (seen.has(m[1])) continue;
-        seen.add(m[1]);
-        list.push({ season: +m[2], number: +m[3], title: 'T' + m[2] + 'E' + m[3], ref: 'cv:' + m[1] });
-      }
-    }
-    return { episodes: list };
-  },
-  async resolve(path) {
-    // path = "/peliculas/<slug>/" or "/tv/<id>/<slug>/". The detail page's player loads from
-    // "<path>ver.html", which carries a videojs src({ src: ... }) or an iframe.
-    const base = path.startsWith('/') ? 'https://cuevanaserie.pro' + path : 'https://cuevanaserie.pro/peliculas/' + path + '/';
-    const ver = base.replace(/\/?$/, '/').replace(/\/$/, '') + '/ver.html';
-    const r = await fetchText(ver, { Referer: base });
-    if (r.ok) {
-      const srcM = /player\.src\(\{\s*src:\s*['"]([^'"]+)['"]/i.exec(r.text) || /src:\s*['"](https?:\/\/[^'"]+)['"]/i.exec(r.text);
-      if (srcM && /\.m3u8($|\?)/i.test(srcM[1])) return { url: srcM[1] };
-      if (srcM && /\.mp4($|\?)/i.test(srcM[1])) {
-        // cuevana serves direct mp4s — including 2.5MB fake-intro bait. Probe
-        // with size gate; on failure keep scanning the page for other players.
-        if (await probeStream(srcM[1], { Referer: base })) return { url: srcM[1], probe: true };
-      }
-      const m3u = r.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-      if (m3u) return { url: m3u[1] };
-      const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(r.text);
-      if (iframeM) {
-        const st = await resolveEmbedUrl(iframeM[1], ver);
-        if (st && st.url) return st;
-      }
-    }
-    const d = await fetchText(base);
-    if (!d.ok) return null;
-    const m3u2 = d.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-    if (m3u2) return { url: m3u2[1] };
-    const iframe2 = /<iframe[^>]+src="([^"]+)"/i.exec(d.text);
-    if (iframe2) {
-      const st = await resolveEmbedUrl(iframe2[1], base);
-      if (st && st.url) return st;
-    }
-    const playM = /data-url="([^"]+)"/.exec(d.text);
-    if (playM) {
-      const st = await resolveEmbedUrl(playM[1], base);
-      if (st && st.url) return st;
-    }
-    return null;
-  }
 });
 
 /* --- PLUTO.TV (JSON API, free live/VOD) --- */
@@ -2833,92 +2615,6 @@ registerSource({
   }
 });
 
-/* --- PELISPLUSD --- */
-registerSource({
-  id: 'ppd',
-  label: 'PelisPlusHD',
-  kind: 'movie',
-  async search(q) {
-    const r = await fetchText('https://pelisplushd.la/search?s=' + encodeURIComponent(q));
-    if (!r.ok) return [];
-    const items = [];
-    const seen = new Set();
-    const re = /href="(?:https:\/\/pelisplushd\.la)?(\/(?:pelicula|serie|pelicula-animada|serie-animada)\/[^"\/]+(?:\/)?)"/g;
-    let m;
-    while ((m = re.exec(r.text)) !== null) {
-      let path = m[1];
-      if (!path.endsWith('/')) path += '/';
-      const slug = path.split('/').filter(Boolean).pop();
-      if (!isValidSlug(slug)) continue;
-      const type = path.includes('/serie') ? 'series' : 'movie';
-      const id = sanitizeId(slug, 'ppd');
-      if (seen.has(id)) continue;
-      seen.add(id);
-      const block = r.text.slice(Math.max(0, m.index - 200), m.index + 600);
-      const titleM = /alt="([^"]+)"/.exec(block) || /data-title="([^"]+)"/.exec(block);
-      const poster = extractPoster(block, 'https://pelisplushd.la');
-      items.push({ id, ref: 'ppd:' + path, title: tmdbQueryTitle(cleanText(titleM ? titleM[1] : '')) || slugToTitle(slug), kind: type, poster });
-    }
-    return items;
-  },
-  async home() {
-    const r = await fetchText('https://pelisplushd.la/');
-    if (!r.ok) return [];
-    const items = [];
-    const seen = new Set();
-    const re = /href="(?:https:\/\/pelisplushd\.la)?(\/(?:pelicula|serie|pelicula-animada|serie-animada)\/[^"\/]+(?:\/)?)"/g;
-    let m;
-    while ((m = re.exec(r.text)) !== null) {
-      let path = m[1];
-      if (!path.endsWith('/')) path += '/';
-      const slug = path.split('/').filter(Boolean).pop();
-      if (!isValidSlug(slug)) continue;
-      const type = path.includes('/serie') ? 'series' : 'movie';
-      const id = sanitizeId(slug, 'ppd');
-      if (seen.has(id)) continue;
-      seen.add(id);
-      const block = r.text.slice(Math.max(0, m.index - 200), m.index + 600);
-      const titleM = /alt="([^"]+)"/.exec(block) || /data-title="([^"]+)"/.exec(block);
-      const poster = extractPoster(block, 'https://pelisplushd.la');
-      items.push({ id, ref: 'ppd:' + path, title: tmdbQueryTitle(cleanText(titleM ? titleM[1] : '')) || slugToTitle(slug), kind: type, poster, badges: ['HD'] });
-    }
-    return items;
-  },
-  async resolve(path) {
-    const lz = lazyEmbedOf(path);
-    const base = lz ? path.slice(0, path.indexOf('|u=')) : path;
-    const url = 'https://pelisplushd.la' + base;
-    if (lz) {
-      const st = await resolveEmbedUrl(lz, url);
-      return st && st.url ? { url: st.url, ...(st.headers ? { headers: st.headers } : {}) } : null;
-    }
-    const r = await fetchText(url);
-    if (!r.ok) return null;
-    const dataUrls = [...r.text.matchAll(/data-url="([^"]+)"/g)].map((m) => m[1]);
-    if (dataUrls.length > 0) {
-      const { ok, state } = await eagerEmbeds(dataUrls, url);
-      if (ok.length > 0) {
-        const primary = ok[0].st;
-        const eagerAlts = ok.slice(1, 4).map((r2, i) => ({ label: embedLabel(r2.opt, i), url: r2.st.url, ...(r2.st.headers ? { headers: r2.st.headers } : {}) }));
-        const alts = [...eagerAlts, ...lazyAltsFrom(dataUrls, state, path)];
-        return {
-          url: primary.url,
-          ...(primary.headers ? { headers: primary.headers } : {}),
-          ...(alts.length > 0 ? { alternatives: alts } : {})
-        };
-      }
-    }
-    const m3u = r.text.match(/(https?:\/\/[^"'\s]+\.m3u8[^"'\s]*)/i);
-    if (m3u) return { url: m3u[1] };
-    const iframeM = /<iframe[^>]+src="([^"]+)"/i.exec(r.text);
-    if (iframeM) {
-      const st = await resolveEmbedUrl(iframeM[1], url);
-      if (st && st.url) return st;
-    }
-    return null;
-  }
-});
-
 /* --- 1MOVIES --- */
 registerSource({
   id: '1mv',
@@ -3013,14 +2709,244 @@ registerSource({
   }
 });
 
+/* ---------- fuentes por ID TMDB (fast paths del catálogo) ---------- */
+// El catálogo TMDB ya trae el id: estas fuentes resuelven sin fan-out por
+// título y van antes de buscar en las demás. Ref: "<src>:movie:<tmdb>" o
+// "<src>:tv:<tmdb>:<temporada>:<episodio>".
+
+const FRX_API = 'https://api.framextv.tech/api/stream';
+const VL_BASE = 'https://vidlink.pro/api/b';
+const VL_ENC = 'https://enc-dec.app/api/enc-vidlink';
+const DFX_SITE = 'https://mg.homelabx.qzz.io';
+const NUVIO_REPO = 'D3adlyRocket/All-in-One-Nuvio';
+
+/** "<tipo>:<id>[:<temporada>:<episodio>]" → tipo ('movie'|'tv'), id TMDB y episodio. */
+function idRefParts(path) {
+  const parts = String(path || '').split(':');
+  const type = parts[0] === 'tv' || parts[0] === 'series' || parts[0] === 'serie' ? 'tv'
+    : parts[0] === 'movie' ? 'movie' : '';
+  const id = /^\d+$/.test(parts[1] || '') ? parts[1] : '';
+  const season = parseInt(parts[2], 10);
+  const episode = parseInt(parts[3], 10);
+  return { type, id, season: season > 0 ? season : 0, episode: episode > 0 ? episode : 0 };
+}
+
+/* --- FRAMEX (api.framextv.tech: id TMDB directo, movie/tv) --- */
+registerSource({
+  id: 'frx',
+  label: 'FrameX',
+  kind: 'movie',
+  prio: 2,
+  async resolve(path) {
+    const { type, id, season, episode } = idRefParts(path);
+    if (!type || !id) return null;
+    let url = FRX_API + '?type=' + type + '&id=' + id;
+    if (type === 'tv') {
+      if (!season || !episode) return null;
+      url += '&season=' + season + '&episode=' + episode;
+    }
+    const j = await fetchJson(url, { Referer: 'https://framextv.tech/' }, 12000);
+    if (!j || !j.success || !Array.isArray(j.sources)) return null;
+    const urls = [];
+    for (const s of j.sources) {
+      if (!s || typeof s.url !== 'string' || !/^https?:/.test(s.url)) continue;
+      if (urls.some((u) => u.url === s.url)) continue;
+      urls.push(s);
+    }
+    if (!urls.length) return null;
+    const labelOf = (s) => String(s.server || s.quality || 'FrameX').slice(0, 44);
+    const subs = (Array.isArray(j.subtitles) ? j.subtitles : [])
+      .filter((s) => s && typeof s.url === 'string' && /^https?:/.test(s.url))
+      .slice(0, 4)
+      .map((s) => ({ lang: String(s.lang || s.language || 'es').slice(0, 8), url: s.url, format: /\.srt(\?|$)/i.test(s.url) ? 'srt' : 'vtt' }));
+    const alts = urls.slice(1, 5).map((s) => ({ label: labelOf(s), url: s.url }));
+    return {
+      url: urls[0].url,
+      label: labelOf(urls[0]),
+      ...(subs.length ? { subtitles: subs } : {}),
+      ...(alts.length ? { alternatives: alts } : {})
+    };
+  }
+});
+
+/* --- NUVIO (scrapers del repositorio declarado en nuvioRepos, capability "nuvio") --- */
+registerSource({
+  id: 'nuv',
+  label: 'Nuvio',
+  kind: 'movie',
+  prio: 4,
+  async resolve(path) {
+    const { type, id, season, episode } = idRefParts(path);
+    if (!id || (type === 'tv' && (!season || !episode))) return null;
+    if (typeof kino.nuvio !== 'object' || !kino.nuvio || typeof kino.nuvio.streams !== 'function') return null;
+    // Prepara (instala) los scrapers que falten: máximo 12 por llamada.
+    if (typeof kino.nuvio.available === 'function' && typeof kino.nuvio.use === 'function') {
+      try {
+        const offered = await kino.nuvio.available({ repo: NUVIO_REPO });
+        const missing = (Array.isArray(offered) ? offered : [])
+          .filter((s) => s && s.id && s.compatible !== false && !s.installed)
+          .map((s) => s.id);
+        if (missing.length) await kino.nuvio.use({ repo: NUVIO_REPO, scrapers: missing.slice(0, 12) });
+      } catch (e) { log(`[nuvio] use: ${(e && e.code) || 'error'}`); }
+    }
+    const q = { repo: NUVIO_REPO, type: type === 'tv' ? 'series' : 'movie', tmdbId: Number(id), timeoutMs: 20000 };
+    if (type === 'tv') { q.season = season; q.episode = episode; }
+    let ans = null;
+    try { ans = await kino.nuvio.streams(q); } catch (e) { log(`[nuvio] streams: ${(e && e.code) || 'error'}`); return null; }
+    const results = ans && Array.isArray(ans.results) ? ans.results : [];
+    const ok = results.filter((r) => r && r.ok && r.stream && typeof r.stream.url === 'string' && /^https?:/.test(r.stream.url));
+    if (!ok.length) {
+      const failed = results.filter((r) => r && r.ok === false).map((r) => `${(r.scraper && r.scraper.name) || '?'}:${r.code}`);
+      if (failed.length) log(`[nuvio] sin fuentes para ${type} ${id}: ${failed.slice(0, 4).join(', ')}`);
+      return null;
+    }
+    const nameOf = (r) => String((r.scraper && r.scraper.name) || 'Nuvio').slice(0, 40);
+    const head = ok[0].stream;
+    const seen = new Set([head.url]);
+    const alts = [];
+    const push = (s, name) => {
+      if (!s || typeof s.url !== 'string' || !/^https?:/.test(s.url)) return;
+      if (seen.has(s.url) || alts.length >= 7) return;
+      seen.add(s.url);
+      alts.push({ label: String(s.label || name).slice(0, 44), url: s.url, ...(s.headers ? { headers: s.headers } : {}) });
+    };
+    for (const r of ok.slice(0, 6)) {
+      push(r.stream, nameOf(r));
+      for (const a of (Array.isArray(r.stream.alternatives) ? r.stream.alternatives : [])) push(a, nameOf(r));
+    }
+    return {
+      url: head.url,
+      label: String(head.label || nameOf(ok[0])).slice(0, 44),
+      ...(head.mime ? { mime: head.mime } : {}),
+      ...(head.headers ? { headers: head.headers } : {}),
+      ...(head.expiresInSeconds ? { expiresInSeconds: head.expiresInSeconds } : {}),
+      ...(Array.isArray(head.subtitles) && head.subtitles.length ? { subtitles: head.subtitles.slice(0, 4) } : {}),
+      ...(alts.length ? { alternatives: alts } : {})
+    };
+  }
+});
+
+/** IMDb del id TMDB vía kino.meta (Kino 0.9.53+), cacheado 30 días en storage. */
+async function imdbForTmdb(type, tmdbId) {
+  const key = 'imdb:' + type + ':' + tmdbId;
+  try { const hit = kino.storage.get(key); if (hit) return hit; } catch {}
+  if (typeof kino.meta !== 'function') return null;
+  let imdb = null;
+  try {
+    const meta = await kino.meta({ type: type === 'tv' ? 'series' : 'movie', ids: { tmdb: Number(tmdbId) }, lang: tmdbLang() });
+    imdb = meta && meta.ids && /^tt\d{5,10}$/.test(String(meta.ids.imdb || '')) ? meta.ids.imdb : null;
+  } catch (e) { log(`[dfx] kino.meta: ${(e && e.code) || 'error'}`); }
+  if (imdb) { try { kino.storage.set(key, imdb, { ttlMs: 30 * 24 * 3600 * 1000 }); } catch {} }
+  return imdb;
+}
+
+/* --- DEEPFLIX (puente Stremio por IMDb: /stream/<tipo>/<imdb>.json) --- */
+registerSource({
+  id: 'dfx',
+  label: 'DeepFlix',
+  kind: 'movie',
+  prio: 3,
+  async resolve(path) {
+    const { type, id, season, episode } = idRefParts(path);
+    if (!id || (type === 'tv' && (!season || !episode))) return null;
+    const imdb = await imdbForTmdb(type, id);
+    if (!imdb) return null;
+    const streamPath = type === 'tv' ? `series/${imdb}:${season}:${episode}` : `movie/${imdb}`;
+    const j = await fetchJson(`${DFX_SITE}/stream/${streamPath}.json`, null, 15000);
+    if (!j || !Array.isArray(j.streams)) return null;
+    const links = [];
+    for (const s of j.streams) {
+      const u = s && s.url;
+      // Solo el enlace de resolución propio: redirige (302) al archivo y el sitio es su Referer.
+      if (typeof u !== 'string' || !u.startsWith(DFX_SITE + '/resolve/')) continue;
+      if (links.some((l) => l.url === u)) continue;
+      links.push({ url: u, quality: (String(s.description || '').match(/(\d{3,4})p/) || [])[1] || '' });
+    }
+    if (!links.length) return null;
+    const headers = { Referer: DFX_SITE + '/' };
+    const labelOf = (l) => ('DeepFlix · ' + (l.quality ? l.quality + 'p' : 'Latino')).slice(0, 44);
+    const alts = links.slice(1, 5).map((l) => ({ label: labelOf(l), url: l.url, headers }));
+    return { url: links[0].url, label: labelOf(links[0]), headers, ...(alts.length ? { alternatives: alts } : {}) };
+  }
+});
+
+/* --- VIDLINK (vidlink.pro: id TMDB cifrado vía enc-dec.app) --- */
+registerSource({
+  id: 'vlk',
+  label: 'Vidlink',
+  kind: 'movie',
+  prio: 5,
+  async resolve(path) {
+    const { type, id, season, episode } = idRefParts(path);
+    if (!id || (type === 'tv' && (!season || !episode))) return null;
+    const enc = await fetchJson(`${VL_ENC}?text=${id}`, null, 15000);
+    const token = enc && typeof enc.result === 'string' ? enc.result : '';
+    if (!token) return null;
+    const url = type === 'tv' ? `${VL_BASE}/tv/${token}/${season}/${episode}` : `${VL_BASE}/movie/${token}`;
+    const j = await fetchJson(url, { Referer: 'https://vidlink.pro/' }, 12000);
+    if (!j) return null;
+    const st = j.stream || {};
+    const urls = [];
+    if (typeof st.playlist === 'string' && /^https?:/.test(st.playlist)) urls.push({ url: st.playlist, quality: 'auto' });
+    if (st.qualities && typeof st.qualities === 'object') {
+      const qs = Object.keys(st.qualities).sort((a, b) => (parseInt(b, 10) || 0) - (parseInt(a, 10) || 0));
+      for (const q of qs) {
+        const v = st.qualities[q];
+        if (v && typeof v.url === 'string' && /^https?:/.test(v.url)) urls.push({ url: v.url, quality: /^\d+$/.test(q) ? q + 'p' : q });
+      }
+    }
+    if (!urls.length && typeof j.url === 'string' && /^https?:/.test(j.url)) urls.push({ url: j.url, quality: 'auto' });
+    if (!urls.length) return null;
+    const labelOf = (l) => ('Vidlink · ' + l.quality).slice(0, 44);
+    const seen = new Set();
+    const uniq = urls.filter((l) => (seen.has(l.url) ? false : (seen.add(l.url), true)));
+    const alts = uniq.slice(1, 5).map((l) => ({ label: labelOf(l), url: l.url }));
+    return { url: uniq[0].url, label: labelOf(uniq[0]), ...(alts.length ? { alternatives: alts } : {}) };
+  }
+});
+
+/** Fuentes que resuelven por id TMDB, en orden de fiabilidad (n79 va primero en tmdb resolve). */
+const TMDB_ID_SRCS = ['frx', 'nuv', 'dfx', 'vlk'];
+const TMDB_ID_SRC_SET = new Set([...TMDB_ID_SRCS, 'n79']);
+
+/**
+ * Resuelve un título por su id TMDB sin pasar por el fan-out de títulos.
+ * Las fuentes que no se prueban quedan como copias perezosas ({label, ref}).
+ */
+async function tmdbIdStreams(type, id, season, episode, skip) {
+  const path = type === 'tv' ? 'tv:' + id + ':' + season + ':' + episode : 'movie:' + id;
+  const tried = new Set(skip || []);
+  for (const srcId of TMDB_ID_SRCS) {
+    if (tried.has(srcId)) continue;
+    const src = SOURCES[srcId];
+    if (!src || !src.resolve) continue;
+    // nuvio no usa kino.fetch: su cupo es el de kino.nuvio (20/min), no el de 60.
+    if (srcId !== 'nuv' && FETCH_BUDGET <= 4) { log(`[tmdb] id fast-path corto por presupuesto (${FETCH_BUDGET})`); break; }
+    tried.add(srcId);
+    let st = null;
+    try { st = await src.resolve(path); } catch { st = null; }
+    if (st && st.url) {
+      log(`[tmdb] id fast-path ${srcId} ok (tmdb ${id})`);
+      const alts = Array.isArray(st.alternatives) ? [...st.alternatives] : [];
+      for (const rest of TMDB_ID_SRCS) {
+        if (alts.length >= 8 || tried.has(rest)) continue;
+        const name = (SOURCES[rest] && SOURCES[rest].label) || rest;
+        alts.push({ label: name, ref: rest + ':' + path });
+      }
+      return { ...st, ...(alts.length ? { alternatives: alts } : {}) };
+    }
+  }
+  return null;
+}
+
 /* ---------- TMDB catalog ---------- */
 
 const TMDB_API = 'https://api.themoviedb.org/3';
 const TMDB_IMG = 'https://image.tmdb.org/t/p';
 const TMDB_CACHE_MS = 6 * 60 * 60 * 1000;
 
-const TMDB_MOVIE_SRCS = ['cc', 'pgh', 'cv', 'sl', 'hs', 'chp', 'chx', 'ent', 'n79', 'ppd', 'ofx', '1mv', 'vpo'];
-const TMDB_SERIES_SRCS = ['sl', 'cv', 'pgh', 'cc', 'ent', 'n79', 'chp', 'chx', 'hs', 'jkanime', 'av1', 'afv'];
+const TMDB_MOVIE_SRCS = ['cc', 'pgh', 'sl', 'chp', 'chx', 'ent', 'n79', 'ofx', '1mv', 'vpo'];
+const TMDB_SERIES_SRCS = ['sl', 'pgh', 'cc', 'ent', 'n79', 'chp', 'chx', 'jkanime', 'av1', 'afv'];
 
 function tmdbKey() {
   try { const k = kino.config.get('tmdbKey'); return typeof k === 'string' ? k.trim() : ''; } catch { return ''; }
@@ -3308,11 +3234,11 @@ async function enrichDetails(items, cap = 36) {
 async function tmdbCandidates(title, kind) {
   const want = kind === 'series' ? 'series' : 'movie';
   const primaryIds = kind === 'series'
-    ? ['sl', 'cv', 'pgh', 'cc', 'hs', 'n79', 'jkanime', 'afv']
-    : ['cc', 'sl', 'cv', 'pgh', 'hs', 'ppd', 'n79', 'vpo'];
+    ? ['sl', 'pgh', 'cc', 'n79', 'ent', 'jkanime', 'afv']
+    : ['cc', 'sl', 'pgh', 'n79', 'ent', 'vpo'];
   const secondaryIds = kind === 'series'
-    ? ['ent', 'chp', 'chx', 'av1']
-    : ['chp', 'chx', 'ent', 'ofx', '1mv'];
+    ? ['chp', 'chx', 'av1']
+    : ['chp', 'chx', 'ofx', '1mv'];
 
   const idsToSearch = [...primaryIds];
   const settled = await mapLimit(idsToSearch, SEARCH_CONCURRENCY, (id) => safeSearch(SOURCES[id], title));
@@ -3437,13 +3363,19 @@ registerSource({
   },
   async resolve(path) {
     const { kind, id, title } = tmdbSplit(path);
-    // Fast path: n79 resolves straight from the TMDB id in a single request.
+    // Fast path: n79 resuelve de una sola petición por id TMDB; si falla,
+    // frx/nuvio/dfx/vlk lo intentan por id antes del fan-out por título.
     if (id && kind !== 'series') {
       let st;
       try { st = await SOURCES.n79.resolve('movie:' + id); } catch { st = null; }
       if (st && st.url) {
         log(`[tmdb] resolved "${title || id}" via n79 (id ${id})`);
         return st;
+      }
+      const byId = await tmdbIdStreams('movie', id, 0, 0, ['n79']);
+      if (byId && byId.url) {
+        log(`[tmdb] resolved "${title || id}" por id TMDB (id ${id})`);
+        return byId;
       }
     }
     if (!title) return null;
@@ -3699,12 +3631,9 @@ async function home() {
     const sourcesList = [
       { key: 'sl', id: 'sl-estrenos', title: '🎬 SoloLatino · Estrenos', genre: 'peliculas' },
       { key: 'cc', id: 'cc-peliculas', title: '🍿 CineCalidad · Películas', genre: 'peliculas' },
-      { key: 'hs', id: 'hs-estrenos', title: '⚡ HackStore · Cartelera', genre: 'peliculas' },
       { key: 'vpo', id: 'vpo-estrenos', title: '🌟 VerPelículasOnline · Novedades', genre: 'peliculas' },
       { key: 'pgh', id: 'pgh-cine', title: '🎥 PelisGratisHDs · Cine', genre: 'peliculas' },
-      { key: 'ppd', id: 'ppd-populares', title: '✨ PelisPlusHD · Tendencias', genre: 'peliculas' },
       { key: 'ent', id: 'ent-estrenos', title: '💎 EntrePelículas · Destacados', genre: 'peliculas' },
-      { key: 'cv', id: 'cv-series', title: '📺 CuevanaSerie · Series', genre: 'series' },
       { key: 'n79', id: 'n79-top', title: '🏆 Net79 · Top TMDb', genre: 'peliculas' },
       { key: '1mv', id: '1mv-cinema', title: '🌍 1Movies · Cinema', genre: 'peliculas' },
       { key: 'av1', id: 'av1-anime', title: '🔥 AnimeAV1 · Últimos', genre: 'anime' },
@@ -3760,10 +3689,8 @@ async function section(param) {
       const list = [
         { key: 'sl', id: 'sec-sl-movies', title: '🎬 SoloLatino · Películas' },
         { key: 'cc', id: 'sec-cc-movies', title: '🍿 CineCalidad · Novedades' },
-        { key: 'hs', id: 'sec-hs-movies', title: '⚡ HackStore · Cartelera' },
         { key: 'vpo', id: 'sec-vpo-movies', title: '🌟 VerPelículasOnline · Estrenos' },
         { key: 'pgh', id: 'sec-pgh-movies', title: '🎥 PelisGratisHDs · HD' },
-        { key: 'ppd', id: 'sec-ppd-movies', title: '✨ PelisPlusHD · Cine' },
         { key: 'ent', id: 'sec-ent-movies', title: '💎 EntrePelículas · Selección' },
         { key: 'n79', id: 'sec-n79-movies', title: '🏆 Net79 · Películas Populares' },
         { key: '1mv', id: 'sec-1mv-movies', title: '🌍 1Movies · Global' }
@@ -3774,7 +3701,6 @@ async function section(param) {
       }, startedAt + 8000);
     } else if (tmdbWantSourceRows() && selectedTab === 'series') {
       const list = [
-        { key: 'cv', id: 'sec-cv-series', title: '📺 CuevanaSerie · Populares' },
         { key: 'sl', id: 'sec-sl-series', title: '🔥 SoloLatino · Temporadas' },
         { key: 'pgh', id: 'sec-pgh-series', title: '✨ PelisGratisHDs · Series' },
         { key: 'ent', id: 'sec-ent-series', title: '💎 EntrePelículas · Capítulos' },
@@ -3824,6 +3750,12 @@ async function section(param) {
 async function details(ref) {
   const raw = typeof ref === 'string' ? ref : '';
   if (!raw) return null;
+  // Calentar: al abrir la ficha ya se le pide al servidor la lista de copias, para que cuando se dé
+  // a reproducir esté cacheada. Sin esperar: la ficha no se frena por esto.
+  if (raw.startsWith('mg:') && serverReady()) {
+    const warm = decodeMgRefs(raw);
+    if (warm.length > 1) serverResolve(warm, {});
+  }
   let item = null;
   if (raw.startsWith('tmdb:')) {
     const parsed = tmdbSplit(raw.slice(5));
@@ -3975,6 +3907,8 @@ function kindOfOwnRef(srcId, ref) {
   switch (srcId) {
     case 'av1': case 'afv': return 'series';
     case 'pluto': case '1mv': return 'movie';
+    case 'frx': case 'vlk': case 'dfx': case 'nuv':
+      return first === 'tv' || first === 'series' || first === 'serie' ? 'series' : first === 'movie' ? 'movie' : null;
     case 'tmdb': return first === 'series' ? 'series' : first === 'movie' ? 'movie' : null;
     case 'n79': case 'ofx': case 'chp': case 'chx':
       return first === 'series' || first === 'serie' ? 'series' : first === 'movie' ? 'movie' : null;
@@ -3982,14 +3916,8 @@ function kindOfOwnRef(srcId, ref) {
       return typeTok === 'series' || typeTok === 'serie' ? 'series' : typeTok === 'movie' || typeTok === 'pelicula' ? 'movie' : null;
     case 'sl':
       return first === 'serie' || first === 'series' || first === 'toon' ? 'series' : first === 'pelicula' || first === 'peliculas' ? 'movie' : null;
-    case 'hs':
-      return first === 'peliculas' ? 'movie' : first === 'series' ? 'series' : null;
-    case 'cv':
-      return flat.indexOf('/tv/') === 0 || flat.indexOf('/serie/') === 0 ? 'series' : flat.indexOf('/pelicula') === 0 ? 'movie' : null;
     case 'ent':
       return flat.indexOf('/serie/') === 0 ? 'series' : flat.indexOf('/pelicula/') === 0 ? 'movie' : null;
-    case 'ppd':
-      return flat.indexOf('/serie') !== -1 ? 'series' : flat.indexOf('/pelicula') !== -1 ? 'movie' : null;
     default: return null; // jkanime y afuera: no se adivina, se deja sin reclamar
   }
 }
@@ -4000,8 +3928,8 @@ function ownMigrateId(srcId, ref) {
   const parts = path.split(':');
   if (srcId === 'tmdb') return sanitizeId('tmdb' + parts[0] + parts[1], 't');
   let slug = '';
-  if (['cc', 'hs', 'chp', 'chx', 'sl', 'pgh', 'vpo', 'n79', 'ofx'].indexOf(srcId) !== -1 && parts.length >= 2) slug = parts[1];
-  else if (srcId === 'cv' || srcId === 'ent' || srcId === 'ppd') { const seg = path.split('/').filter(Boolean); slug = seg[seg.length - 1] || path; }
+  if (['cc', 'chp', 'chx', 'sl', 'pgh', 'vpo', 'n79', 'ofx', 'frx', 'vlk', 'dfx', 'nuv'].indexOf(srcId) !== -1 && parts.length >= 2) slug = parts[1];
+  else if (srcId === 'ent') { const seg = path.split('/').filter(Boolean); slug = seg[seg.length - 1] || path; }
   else slug = parts[0] || path;
   return sanitizeId(slug, srcId) || sanitizeId(path, srcId);
 }
@@ -4170,6 +4098,226 @@ async function episodes(params) {
   return { episodes: eps.episodes || [] };
 }
 
+/* ---------- YojaTV-server: resolver fuera del dispositivo (caché + orden por velocidad) ----------
+ * El servidor corre este mismo plugin en Node: guarda los enlaces ya resueltos, los intenta en el
+ * orden en que responde cada fuente y devuelve la lista con su calidad ("1080p: FuegoCine").
+ * Si no contesta, se le acaba el tiempo o no sabe resolver alguna fuente (el kit de Node no tiene
+ * navegador oculto), se resuelve en el dispositivo como siempre: el servidor acelera, nunca es
+ * requisito. */
+const SERVER_URL = 'https://yojatv-server.onrender.com';
+const SERVER_TIMEOUT_MS = 12000;
+const SERVER_REPORT_TIMEOUT_MS = 3000;
+const SERVER_RETRY_AFTER_MS = 30 * 1000;
+let _serverDownUntil = 0; // tras un fallo, no se vuelve a preguntar en un rato
+const _lastResolved = new Map(); // ref -> url que se le dio a Kino (para reportar el enlace que falló)
+
+function serverReady() { return Date.now() >= _serverDownUntil; }
+function serverPause(ms) { _serverDownUntil = Date.now() + (ms || SERVER_RETRY_AFTER_MS); }
+
+function rememberResolved(ref, url) {
+  if (!ref || !url) return;
+  _lastResolved.delete(ref);
+  _lastResolved.set(ref, url);
+  while (_lastResolved.size > 200) _lastResolved.delete(_lastResolved.keys().next().value);
+}
+
+/** Los refs candidatos de un ref fusionado (mg:). */
+function decodeMgRefs(ref) {
+  if (typeof ref !== 'string' || !ref.startsWith('mg:')) return [];
+  try {
+    const arr = JSON.parse(decodeURIComponent(ref.slice(3)));
+    if (Array.isArray(arr)) return arr.filter((r) => typeof r === 'string' && r).slice(0, 16);
+  } catch { /* ref malformado */ }
+  return [];
+}
+
+/** POST JSON al servidor. Null si no contesta, si va lento o si lo rechaza: nunca lanza. */
+async function serverPost(path, body, timeoutMs) {
+  const t = Math.min(Math.trunc(Number(timeoutMs)) || SERVER_TIMEOUT_MS, 30000);
+  try {
+    const res = await kino.fetch(SERVER_URL + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body || {}),
+      timeoutMs: t
+    });
+    if (!res || !res.ok) {
+      const status = res ? res.status : 0;
+      log(`[server ${path}] HTTP ${status}`);
+      if (status === 429) serverPause(60000);
+      else if (status >= 500) serverPause(15000);
+      return null;
+    }
+    const data = JSON.parse(getText(res));
+    return data && typeof data === 'object' ? data : null;
+  } catch (e) {
+    log(`[server ${path}] sin respuesta: ${e && e.message ? e.message : e}`);
+    serverPause();
+    return null;
+  }
+}
+
+function serverLabel(s) {
+  const l = s && typeof s.label === 'string' ? s.label.trim() : '';
+  return l ? l.slice(0, 48) : 'Servidor';
+}
+
+/** La respuesta del servidor, traducida al Stream de Kino (copia principal + alternativas). */
+function streamFromServer(data) {
+  const list = data && Array.isArray(data.streams) ? data.streams.filter((s) => s && typeof s.url === 'string' && s.url) : [];
+  if (!list.length) return null;
+  const [first, ...rest] = list;
+  const alts = [];
+  const seen = new Set([first.url]);
+  for (const s of rest) {
+    if (alts.length >= 8) break;
+    if (seen.has(s.url)) continue;
+    seen.add(s.url);
+    alts.push({ label: serverLabel(s), url: s.url, ...(s.headers ? { headers: s.headers } : {}) });
+  }
+  // Lo que el servidor no pudo resolver queda como copia perezosa: si alguien la elige, Kino vuelve
+  // a llamar a resolve con ese ref y ahí se intenta (y se cachea) en el momento.
+  const unresolved = data && Array.isArray(data.unresolved) ? data.unresolved : [];
+  for (const u of unresolved) {
+    if (alts.length >= 8) break;
+    const uRef = u && typeof u === 'object' ? u.ref : u;
+    if (typeof uRef !== 'string' || !uRef || uRef.length > 512 || seen.has(uRef)) continue;
+    seen.add(uRef);
+    alts.push({ label: (labelOfRef(uRef) || uRef.split(':')[0]).slice(0, 48), ref: uRef });
+  }
+  const out = {
+    url: first.url,
+    label: serverLabel(first),
+    ...(first.headers ? { headers: first.headers } : {}),
+    ...(first.mime ? { mime: first.mime } : {}),
+    ...(alts.length ? { alternatives: alts } : {})
+  };
+  const exp = Number(first.expiresInSeconds);
+  if (Number.isFinite(exp) && exp >= 30 && exp <= 86400) out.expiresInSeconds = exp;
+  return out;
+}
+
+/** Pide la lista resuelta al servidor. Null si no sirve y hay que resolver aquí. */
+async function serverResolve(refs, opts) {
+  if (!serverReady() || !Array.isArray(refs) || !refs.length) return null;
+  const o = opts || {};
+  const body = { refs: refs.slice(0, 16) };
+  if (o.title) body.title = String(o.title).slice(0, 200);
+  if (o.retry) body.retry = o.retry;
+  const data = await serverPost('/resolve', body, SERVER_TIMEOUT_MS);
+  if (!data) return null;
+  if (!data.ok || !Array.isArray(data.streams) || !data.streams.length) {
+    log(`[server] el servidor no resolvió nada (${(data.error || 'sin_streams')}) para ${refs.length} refs`);
+    return null;
+  }
+  return data;
+}
+
+/** Avisa al servidor de un enlace que ya no sirve: lo borra de la caché. Nunca lanza. */
+async function serverReport(payload) {
+  if (!serverReady() || !payload) return null;
+  return serverPost('/report', payload, SERVER_REPORT_TIMEOUT_MS);
+}
+
+/** Le entrega al servidor un stream que se resolvió aquí, para que la próxima vez esté en caché. */
+async function serverSeed(ref, stream) {
+  if (!serverReady() || !ref || !stream || !stream.url) return null;
+  return serverPost('/seed', {
+    ref,
+    stream: {
+      url: stream.url,
+      ...(stream.headers ? { headers: stream.headers } : {}),
+      ...(stream.mime ? { mime: stream.mime } : {}),
+      ...(stream.label ? { label: String(stream.label).slice(0, 48) } : {})
+    }
+  }, SERVER_REPORT_TIMEOUT_MS);
+}
+
+/* --- Nuvio: solo el dispositivo puede resolverlo (kino.nuvio vive en la app), nunca el servidor.
+ * Se lanza en paralelo con la pregunta al servidor y se ofrece como una fuente más de la lista;
+ * lo que dé se le entrega al servidor cacheado, para que la próxima vez venga de fábrica. --- */
+const NUV_WAIT_MS = 3500;
+
+function validExpires(e) {
+  const n = Number(e);
+  return Number.isFinite(n) && n >= 30 && n <= 86400;
+}
+
+/** Ref de Nuvio derivando el id TMDB del propio ref, si lo trae. */
+function nuvRefFor(r) {
+  if (typeof r !== 'string' || !r) return null;
+  if (r.startsWith('tmdb:')) {
+    const p = tmdbSplit(r.slice(5));
+    return p && p.id && p.kind !== 'series' ? 'nuv:movie:' + p.id : null;
+  }
+  let m = /^n79:movie:(\d+)/.exec(r);
+  if (m) return 'nuv:movie:' + m[1];
+  m = /^n79:serie:(\d+):(\d+):(\d+)/.exec(r);
+  if (m) return 'nuv:tv:' + m[1] + ':' + m[2] + ':' + m[3];
+  return null;
+}
+
+function firstNuvRef(candidates) {
+  if (!Array.isArray(candidates)) return null;
+  for (const c of candidates) {
+    const r = nuvRefFor(c);
+    if (r) return r;
+  }
+  return null;
+}
+
+/** Resuelve Nuvio aquí; nunca rechaza y siembra el resultado en el servidor. */
+function resolveNuvLocal(nuvRef) {
+  if (!nuvRef) return null;
+  return (async () => {
+    let st = null;
+    try { st = await resolveOneRef(nuvRef); } catch { st = null; }
+    if (!st || !st.url) return null;
+    log(`[nuvio local] ${nuvRef} -> ${st.url.slice(0, 100)}`);
+    serverSeed(nuvRef, st);
+    return st;
+  })();
+}
+
+/** Espera a Nuvio como mucho [ms]; si tarda, sigue sin él (no frena la reproducción). */
+function withCap(promise, ms) {
+  if (!promise) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let done = false;
+    const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, ms);
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(v && v.url ? v : null);
+    };
+    promise.then(finish, () => finish(null));
+  });
+}
+
+/** El stream de Nuvio como una copia más, sin tocar el orden que ya trae la lista. */
+function withNuvAlternative(stream, nuvStream) {
+  if (!stream || !nuvStream || !nuvStream.url || stream.url === nuvStream.url) return stream;
+  const alts = Array.isArray(stream.alternatives) ? [...stream.alternatives] : [];
+  if (alts.length >= 8) return stream;
+  if (alts.some((a) => a && a.url === nuvStream.url)) return stream;
+  const label = (typeof nuvStream.label === 'string' && nuvStream.label.trim() ? nuvStream.label : 'Nuvio').trim().slice(0, 48);
+  alts.push({ label, url: nuvStream.url, ...(nuvStream.headers ? { headers: nuvStream.headers } : {}) });
+  return { ...stream, alternatives: alts };
+}
+
+/** Cuando solo Nuvio pudo resolver: es la respuesta, no un error. */
+function primaryFromNuv(nuvStream) {
+  return {
+    url: nuvStream.url,
+    label: (typeof nuvStream.label === 'string' && nuvStream.label.trim() ? nuvStream.label : 'Nuvio').trim().slice(0, 48),
+    ...(nuvStream.headers ? { headers: nuvStream.headers } : {}),
+    ...(nuvStream.mime ? { mime: nuvStream.mime } : {}),
+    ...(nuvStream.subtitles ? { subtitles: nuvStream.subtitles } : {}),
+    ...(validExpires(nuvStream.expiresInSeconds) ? { expiresInSeconds: nuvStream.expiresInSeconds } : {})
+  };
+}
+
 async function resolveOneRef(ref) {
   const cached = _resolveCache.get(ref);
   if (cached && Date.now() - cached.at < RESOLVE_CACHE_TTL_MS) {
@@ -4182,23 +4330,30 @@ async function resolveOneRef(ref) {
     srcId = parts[0];
     path = parts.slice(1).join(':');
   } else {
-    srcId = SOURCES[ref] ? ref : 'cv';
+    srcId = SOURCES[ref] ? ref : 'sl';
     path = ref;
   }
   const src = SOURCES[srcId];
   if (!src || !src.resolve) return null;
   let stream;
-  try { stream = await src.resolve(path); } catch { return null; }
-  const cacheable = srcId !== 'hs' && stream && stream.url &&
-    !/vimeos|goodstream|\.mp4(?:\?|$)/i.test(stream.url);
+  try { stream = await src.resolve(path); } catch { stream = null; }
+  if ((!stream || !stream.url) && TMDB_ID_SRC_SET.has(srcId)) {
+    // n79 firma los refs de episodio del catálogo y las fuentes por id son
+    // alternativas entre sí: si la que tocó no pudo, el resto lo intenta.
+    const ep = /^(?:serie|series|tv):(\d+):(\d+):(\d+)$/.exec(path);
+    const mov = /^movie:(\d+)$/.exec(path);
+    if (ep) stream = (await tmdbIdStreams('tv', ep[1], ep[2], ep[3], [srcId])) || stream;
+    else if (mov) stream = (await tmdbIdStreams('movie', mov[1], 0, 0, [srcId])) || stream;
+  }
+  if (!stream || !stream.url) return null;
+  const cacheable = !/vimeos|goodstream|\.mp4(?:\?|$)/i.test(stream.url);
   if (cacheable) {
     _resolveCache.set(ref, { at: Date.now(), stream });
-    return stream;
   }
-  return stream && stream.url ? stream : null;
+  return stream;
 }
 
-async function resolve(params) {
+async function resolve(params, options) {
   const startedAt = Date.now();
   await kino.sleep(0);
   fetchBudgetReset();
@@ -4210,6 +4365,32 @@ async function resolve(params) {
     log('[resolve ERROR] missing ref');
     throw kino.error('not_found', 'Referencia no especificada');
   }
+
+  // 1) Primero el servidor: trae la lista ya ordenada (calidad + fuente más rápida) y cacheada.
+  const retry = options && options.retry && typeof options.retry === 'object' ? options.retry : null;
+  const candidates = ref.startsWith('mg:') ? decodeMgRefs(ref) : [ref];
+
+  // Nuvio en paralelo: el servidor no lo puede resolver, así que se lanza aquí mientras contesta.
+  const nuvRef = firstNuvRef(candidates);
+  const nuvP = resolveNuvLocal(nuvRef);
+
+  if (candidates.length) {
+    const remote = await serverResolve(candidates, {
+      ...(retry ? { retry: { reason: retry.reason || null, attempt: retry.attempt || null, status: retry.status || null } } : {})
+    });
+    const remoteStream = streamFromServer(remote);
+    if (remoteStream && remoteStream.url) {
+      const out = withNuvAlternative(remoteStream, await withCap(nuvP, NUV_WAIT_MS));
+      rememberResolved(ref, out.url);
+      log(`[resolve OK] vía YojaTV-server: ${remote.streams.length} copias, servidor ${remote.tookMs} ms, total ${Date.now() - startedAt} ms`);
+      return out;
+    }
+    // 2) Si el servidor no sirve (caído, lento o sin esa fuente), aquí se resuelve como siempre.
+    log('[server] sin resultado útil; se resuelve en el dispositivo');
+  }
+
+  // Nuvio ya lleva rato corriendo: se recoge (con tope) y se usa en los caminos de abajo.
+  const nuvStream = await withCap(nuvP, NUV_WAIT_MS);
 
   if (ref.startsWith('mg:')) {
     let refs = [];
@@ -4267,6 +4448,11 @@ async function resolve(params) {
     }
 
     if (!streams.length) {
+      if (nuvStream) {
+        log('[resolve OK] merged resuelto solo con Nuvio local');
+        rememberResolved(ref, nuvStream.url);
+        return primaryFromNuv(nuvStream);
+      }
       log('[resolve ERROR] no source resolved the merged ref');
       throw kino.error('unavailable', 'No se encontró un servidor de reproducción', { userMessage: 'Este título no se ha encontrado en YojaTV' });
     }
@@ -4309,26 +4495,37 @@ async function resolve(params) {
     }
 
     log(`[resolve OK] merged resolved rápido via ${primary.srcId}: ${primary.url} (${alts.length} alts, ${Date.now() - startedAt} ms)`);
-    return {
+    const merged = {
       url: primary.url,
       label: primary.label,
       ...(primary.headers ? { headers: primary.headers } : {}),
       ...(alts.length ? { alternatives: alts } : {})
     };
+    rememberResolved(ref, merged.url);
+    serverSeed(primary.ref || ref, { url: merged.url, headers: primary.headers || null, label: primary.label || null });
+    return withNuvAlternative(merged, nuvStream);
   }
 
-  const sid = ref.includes(':') ? ref.split(':')[0] : (SOURCES[ref] ? ref : 'cv');
+  const sid = ref.includes(':') ? ref.split(':')[0] : (SOURCES[ref] ? ref : 'sl');
   if (!SOURCES[sid]) {
     log(`[resolve ERROR] unknown source: ${sid}`);
     throw kino.error('not_found', 'Fuente desconocida');
   }
   const stream = await resolveOneRef(ref);
   if (!stream) {
+    if (nuvStream) {
+      log(`[resolve OK] solo Nuvio local resolvió ${ref}`);
+      rememberResolved(ref, nuvStream.url);
+      return primaryFromNuv(nuvStream);
+    }
     log(`[resolve ERROR] no stream returned for ${ref}`);
     throw kino.error('unavailable', 'No se encontró un servidor de reproducción', { userMessage: 'Este título no se ha encontrado en YojaTV' });
   }
   log(`[resolve OK] stream resolved: ${stream.url} (${Date.now() - startedAt} ms)`);
-  return labelStream(stream, SOURCES[sid].label || sid);
+  const labeled = labelStream(stream, SOURCES[sid].label || sid);
+  rememberResolved(ref, labeled.url);
+  serverSeed(ref, labeled);
+  return withNuvAlternative(labeled, nuvStream);
 }
 
 /* ---------- panel de reproducción (apiVersion 9) ---------- */
@@ -4461,12 +4658,27 @@ async function panelAction(event, context) {
     if (['fit', 'fill', 'zoom', '16:9', '21:9'].includes(value)) return { player: { resize: value } };
   }
   return null;
-}
-
-async function playerEvent(event) {
+}async function playerEvent(event, context) {
   try {
     const t = event && event.type;
-    if (t) log(`[playerEvent] ${t}${event.label ? ' · ' + String(event.label).slice(0, 48) : ''}${event.kind ? ' (' + event.kind + ')' : ''}`);
+    if (t) log(`[playerEvent] ${t} ${event.label ? ' · ' + String(event.label).slice(0, 48) : ''}${event.kind ? ' (' + event.kind + ')' : ''}`);
+    // El reproductor dice que el enlace no sirve: se lo contamos al servidor para que borre esa
+    // caché y el siguiente intento traiga otro funcional. Solo si hace falta (un cambio de copia
+    // elegido a mano no es un fallo).
+    if (t === 'failed' || (t === 'copyChanged' && event.automatic === true)) {
+      const ref = context && typeof context.ref === 'string' ? context.ref : null;
+      if (ref) {
+        const payload = {
+          ref,
+          reason: t === 'failed' ? 'playback_failed' : 'copy_failed',
+          ...(event.kind ? { kind: String(event.kind).slice(0, 40) } : {}),
+          ...(event.label ? { label: String(event.label).slice(0, 48) } : {})
+        };
+        const url = _lastResolved.get(ref);
+        if (url) payload.url = url;
+        await serverReport(payload);
+      }
+    }
   } catch {}
   return null;
 }
