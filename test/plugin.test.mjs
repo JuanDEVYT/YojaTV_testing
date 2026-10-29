@@ -44,6 +44,16 @@ test('manifest is apiVersion 11 with browser pages', () => {
   assert.deepEqual(manifest.categories, ['movies', 'series', 'anime', 'live']);
 });
 
+// La app no expone timers globales: un setTimeout dentro de resolve revienta con
+// "ReferenceError: 'setTimeout' is not defined" y Kino devuelve outcome=failed (visto en el
+// dispositivo con YojaTV-alpha). El tope de tiempo va por kino.sleep (contrato: máx. 5000 ms).
+test('plugin.js uses no global timers (the app exposes none)', () => {
+  const src = readFileSync('./plugin.js', 'utf8');
+  for (const bad of [/\bsetTimeout\s*\(/, /\bsetInterval\s*\(/, /\bclearTimeout\s*\(/, /\bclearInterval\s*\(/, /\bsetImmediate\s*\(/]) {
+    assert.ok(!bad.test(src), `${bad} is not available inside the app`);
+  }
+});
+
 test('categories export returns categories array', async () => {
   const cats = await plugin.categories();
   assert.ok(Array.isArray(cats), 'categories must return an array');

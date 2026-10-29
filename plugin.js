@@ -4283,19 +4283,23 @@ function resolveNuvLocal(nuvRef) {
   })();
 }
 
-/** Espera a Nuvio como mucho [ms]; si tarda, sigue sin él (no frena la reproducción). */
+/** Espera a Nuvio como mucho [ms]; si tarda, sigue sin él (no frena la reproducción).
+ * La app no expone timers globales (setTimeout da `ReferenceError: 'setTimeout' is not defined`):
+ * el tope lo pone kino.sleep, que el contrato limita a 5000 ms. Sin sleep, se espera el prometido. */
 function withCap(promise, ms) {
   if (!promise) return Promise.resolve(null);
   return new Promise((resolve) => {
     let done = false;
-    const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, ms);
     const finish = (v) => {
       if (done) return;
       done = true;
-      clearTimeout(timer);
       resolve(v && v.url ? v : null);
     };
     promise.then(finish, () => finish(null));
+    try {
+      const cap = kino.sleep(Math.max(0, Math.min(Number(ms) || 0, 5000)));
+      if (cap && typeof cap.then === 'function') cap.then(() => finish(null), () => finish(null));
+    } catch { /* sin sleep utilizable: se espera al de Nuvio */ }
   });
 }
 
