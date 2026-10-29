@@ -146,7 +146,7 @@ function sanitizeId(raw, prefix) {
 
 /* ---------- logging & debug ---------- */
 
-const PLUGIN_VERSION = '8.2.0';
+const PLUGIN_VERSION = '8.3.0';
 
 function log(...args) {
   try { ringPush(args); } catch {}
@@ -279,7 +279,10 @@ function wrapExport(name, fn) {
       if (!(e && e.code === 'not_found')) reportError('export', name, e);
       throw e;
     } finally {
-      if (_pendingReports.length && Date.now() - t0 < 11000) await flushReports();
+      // El envío de incidentes corre en segundo plano: NUNCA se espera aquí. El importe de la
+      // llamada es lo que Kino cronometra (resolve_ms) y el estado tarda milisegundos, no 30 s.
+      if (_pendingReports.length && Date.now() - t0 < 11000) flushReports().catch(() => {});
+      if (name === 'resolve') log(`[resolve] llamada cerrada en ${Date.now() - t0} ms`);
     }
   };
 }
@@ -3597,6 +3600,23 @@ async function search(params) {
 
   if (!query) return [];
 
+  // PRIORIDAD ESPAÑOL: TMDB se consulta A LA VEZ y va PRIMERO en la lista, con título y sinopsis
+  // en el idioma del catálogo (es-MX por defecto). Antes la búsqueda solo miraba fuentes, cuyos
+  // catálogos vienen en inglés, y eso era lo que se veía en los resultados.
+  const pTmdb = (async () => {
+    if (!tmdbReady()) return [];
+    try {
+      const j = await tmdbFetch('/search/multi', { query, include_adult: 'false' });
+      const list = j && Array.isArray(j.results) ? j.results : [];
+      const hits = list
+        .filter((x) => x && x.id && (x.media_type === 'movie' || x.media_type === 'tv') && !x.adult)
+        .filter((x) => !isUpcomingDate(x.release_date || x.first_air_date || ''))
+        .map((x) => tmdbItem(x, x.media_type === 'tv' ? 'series' : 'movie'));
+      if (hits.length) log(`[search] tmdb en español: ${hits.length} resultado(s) primero`);
+      return hits;
+    } catch { return []; }
+  })();
+
   const ids = Object.keys(SOURCES).filter((id) => id !== 'tmdb');
   const startedAt = Date.now();
   const deadlineAt = startedAt + 13000; // search deja 15 s: margen para rankear
@@ -3608,12 +3628,17 @@ async function search(params) {
     for (const it of hits) if (it) all.push(it); // incremental: el corte conserva lo ya llegado
     return hits;
   }, deadlineAt);
+  // TMDB primero y con tope: si tarda, se responde con lo que hay (las fuentes siguen corriendo).
+  const tmdbRes = await raceDeadline(pTmdb, 3000, 'late');
+  const tmdbHits = tmdbRes === 'late' ? [] : (Array.isArray(tmdbRes) ? tmdbRes : []);
   const settled = await raceDeadline(groups, 13000, 'deadline');
   if (settled === 'deadline') log('[search] plazo alcanzado: se rankea lo que ya llegó');
   // Metadata is resolved on demand by details(); enriching every search hit
   // here makes search spend dozens of meta/TMDB calls before returning.
   const kept = all.filter((it) => !futureYear(it.year));
-  const results = mergeAndRank([kept], query).slice(0, 100);
+  // El grupo TMDB se inserta primero: al agrupar por ids.tmdb, el título y la sinopsis
+  // en español quedan como principal del grupo y las fuentes aportan sus copias.
+  const results = mergeAndRank([tmdbHits, kept], query).slice(0, 100);
   log(`[search] total ranked results: ${results.length}`);
   return results;
 }
@@ -4365,10 +4390,32 @@ async function resolveOneRef(ref) {
  * Antes era secuencial (esperar al servidor y, si no podía, resolver aquí), que en un título
  * frío sumaba 12 s del servidor + 10-15 s del dispositivo = 30 s de espera. --- */
 const NUV_ALT_WAIT_MS = 600; // tope al recoger Nuvio cuando ya hay enlace (copia extra, no bloquea)
+const LOCAL_DELAY_MS = 800; // el dispositivo no arranca si el servidor contesta antes
+
+/* Nuvio en vuelo, compartido entre llamadas: una sola cadena por ref (antes cada resolve lanzaba
+ * la suya) y solo se arranca cuando nada más pudo resolver. */
+const _nuvWarm = new Map();
+
+function nuvWarm(nuvRef) {
+  if (!nuvRef) return null;
+  let p = _nuvWarm.get(nuvRef);
+  if (!p) {
+    p = resolveNuvLocal(nuvRef);
+    const done = () => { if (_nuvWarm.get(nuvRef) === p) _nuvWarm.delete(nuvRef); };
+    p.then(done, done);
+    _nuvWarm.set(nuvRef, p);
+  }
+  return p;
+}
+
+/** La cadena de Nuvio solo si ya estaba corriendo: nunca se arranca una desde un camino rápido. */
+function nuvExisting(nuvRef) {
+  return nuvRef ? (_nuvWarm.get(nuvRef) || null) : null;
+}
 
 /** Todo el camino de resolución en el dispositivo. Devuelve el Stream final (ya etiquetado,
  * recordado y sembrado en el servidor) o null si nada funcionó. Puede lanzar el error de Kino. */
-async function resolveLocal(ref, nuvP, startedAt) {
+async function resolveLocal(ref, nuv, startedAt) {
   if (ref.startsWith('mg:')) {
     let refs = [];
     try { refs = JSON.parse(decodeURIComponent(ref.slice(3))); } catch {}
@@ -4425,8 +4472,8 @@ async function resolveLocal(ref, nuvP, startedAt) {
     }
 
     if (!streams.length) {
-      // No hay nada todavía: aquí sí vale la pena esperar a Nuvio (tope de 3,5 s) antes de rendirse.
-      const nuvStream = await withCap(nuvP, NUV_WAIT_MS);
+      // No hay nada todavía: aquí sí vale la pena arrancar Nuvio y esperarle (tope de 3,5 s).
+      const nuvStream = await withCap(nuv.start(), NUV_WAIT_MS);
       if (nuvStream) {
         log('[resolve OK] merged resuelto solo con Nuvio local');
         rememberResolved(ref, nuvStream.url);
@@ -4482,8 +4529,8 @@ async function resolveLocal(ref, nuvP, startedAt) {
     };
     rememberResolved(ref, merged.url);
     serverSeed(primary.ref || ref, { url: merged.url, headers: primary.headers || null, label: primary.label || null });
-    // Nuvio como copia extra: solo si ya está listo, nunca retrasa la reproducción.
-    return withNuvAlternative(merged, await withCap(nuvP, NUV_ALT_WAIT_MS));
+    // Nuvio como copia extra: solo si su cadena ya estaba corriendo, nunca retrasa la reproducción.
+    return withNuvAlternative(merged, await withCap(nuv.current(), NUV_ALT_WAIT_MS));
   }
 
   const sid = ref.includes(':') ? ref.split(':')[0] : (SOURCES[ref] ? ref : 'sl');
@@ -4493,7 +4540,7 @@ async function resolveLocal(ref, nuvP, startedAt) {
   }
   const stream = await resolveOneRef(ref);
   if (!stream) {
-    const nuvStream = await withCap(nuvP, NUV_WAIT_MS);
+    const nuvStream = await withCap(nuv.start(), NUV_WAIT_MS);
     if (nuvStream) {
       log(`[resolve OK] solo Nuvio local resolvió ${ref}`);
       rememberResolved(ref, nuvStream.url);
@@ -4506,7 +4553,7 @@ async function resolveLocal(ref, nuvP, startedAt) {
   const labeled = labelStream(stream, SOURCES[sid].label || sid);
   rememberResolved(ref, labeled.url);
   serverSeed(ref, labeled);
-  return withNuvAlternative(labeled, await withCap(nuvP, NUV_ALT_WAIT_MS));
+  return withNuvAlternative(labeled, await withCap(nuv.current(), NUV_ALT_WAIT_MS));
 }
 
 /**
@@ -4530,8 +4577,11 @@ async function resolve(params, options) {
 
   const retry = options && options.retry && typeof options.retry === 'object' ? options.retry : null;
   const candidates = ref.startsWith('mg:') ? decodeMgRefs(ref) : [ref];
-  // Nuvio se lanza también aquí: solo el dispositivo puede resolverlo (kino.nuvio vive en la app).
-  const nuvP = resolveNuvLocal(firstNuvRef(candidates));
+  // Nuvio NO se lanza aquí: una cadena de kino.nuvio en vuelo mantiene la llamada abierta en la
+  // app aunque el plugin ya haya devuelto (medido en dispositivo: 33 s de resolve_ms). Solo
+  // arranca desde `resolveLocal` cuando nada más pudo resolver.
+  const nuvRef = firstNuvRef(candidates);
+  const nuv = { start: () => nuvWarm(nuvRef), current: () => nuvExisting(nuvRef) };
 
   // 1) Servidor: caché + lista ordenada con calidad ("1080p: FuegoCine"). Nunca lanza.
   const serverP = (async () => {
@@ -4549,10 +4599,17 @@ async function resolve(params, options) {
     } catch { return null; }
   })();
 
-  // 2) Dispositivo: el mismo camino de siempre, lanzado a la vez. Sus errores se guardan para
-  // re-landarlos si tampoco el servidor pudo.
+  // 2) Dispositivo: arranca solo si el servidor no contesta enseguida. Si el servidor ya tenía
+  // el título (lo habitual), el dispositivo no hace ni una petición y la llamada se cierra en el
+  // acto; eso es lo que quita los 30 s: sin peticiones de fondo, no hay nada que esperar al cerrar.
   const localP = (async () => {
-    const stream = await resolveLocal(ref, nuvP, startedAt);
+    const gate = await Promise.race([
+      serverP.then((v) => ({ settled: true, v }), () => ({ settled: true, v: null })),
+      Promise.resolve().then(() => kino.sleep(LOCAL_DELAY_MS)).then(
+        () => ({ settled: false }), () => ({ settled: false })),
+    ]);
+    if (gate.settled && gate.v) return null; // el servidor ya sirvió: el dispositivo no interviene
+    const stream = await resolveLocal(ref, nuv, startedAt);
     return stream ? { via: 'local', stream } : null;
   })();
 
