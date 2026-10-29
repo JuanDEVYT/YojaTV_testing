@@ -4105,13 +4105,17 @@ async function episodes(params) {
  * navegador oculto), se resuelve en el dispositivo como siempre: el servidor acelera, nunca es
  * requisito. */
 const SERVER_URL = 'https://yojatv-server.onrender.com';
+// El servidor ejecuta ESTE MISMO plugin dentro de Node. Allá preguntarse a sí mismo sería un bucle
+// infinito (el propio /resolve llamaría a /resolve), así que su runtime enciende esta bandera y el
+// cliente queda apagado: en el servidor solo resuelve el dispositivo-emulado de Node.
+const SERVER_OFF = Boolean(globalThis.__YOJA_SERVER__);
 const SERVER_TIMEOUT_MS = 12000;
 const SERVER_REPORT_TIMEOUT_MS = 3000;
 const SERVER_RETRY_AFTER_MS = 30 * 1000;
 let _serverDownUntil = 0; // tras un fallo, no se vuelve a preguntar en un rato
 const _lastResolved = new Map(); // ref -> url que se le dio a Kino (para reportar el enlace que falló)
 
-function serverReady() { return Date.now() >= _serverDownUntil; }
+function serverReady() { return !SERVER_OFF && Date.now() >= _serverDownUntil; }
 function serverPause(ms) { _serverDownUntil = Date.now() + (ms || SERVER_RETRY_AFTER_MS); }
 
 function rememberResolved(ref, url) {
