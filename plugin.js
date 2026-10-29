@@ -4361,45 +4361,14 @@ async function resolveOneRef(ref) {
   return stream;
 }
 
-async function resolve(params, options) {
-  const startedAt = Date.now();
-  await kino.sleep(0);
-  fetchBudgetReset();
-  let ref = '';
-  if (typeof params === 'string') ref = params;
-  else if (params && typeof params.ref === 'string') ref = params.ref;
-  log(`[resolve] resolving stream for ref: "${ref}"`);
-  if (!ref) {
-    log('[resolve ERROR] missing ref');
-    throw kino.error('not_found', 'Referencia no especificada');
-  }
+/* --- Carrera: el servidor y el dispositivo resuelven AL MISMO TIEMPO y gana el primero útil.
+ * Antes era secuencial (esperar al servidor y, si no podía, resolver aquí), que en un título
+ * frío sumaba 12 s del servidor + 10-15 s del dispositivo = 30 s de espera. --- */
+const NUV_ALT_WAIT_MS = 600; // tope al recoger Nuvio cuando ya hay enlace (copia extra, no bloquea)
 
-  // 1) Primero el servidor: trae la lista ya ordenada (calidad + fuente más rápida) y cacheada.
-  const retry = options && options.retry && typeof options.retry === 'object' ? options.retry : null;
-  const candidates = ref.startsWith('mg:') ? decodeMgRefs(ref) : [ref];
-
-  // Nuvio en paralelo: el servidor no lo puede resolver, así que se lanza aquí mientras contesta.
-  const nuvRef = firstNuvRef(candidates);
-  const nuvP = resolveNuvLocal(nuvRef);
-
-  if (candidates.length) {
-    const remote = await serverResolve(candidates, {
-      ...(retry ? { retry: { reason: retry.reason || null, attempt: retry.attempt || null, status: retry.status || null } } : {})
-    });
-    const remoteStream = streamFromServer(remote);
-    if (remoteStream && remoteStream.url) {
-      const out = withNuvAlternative(remoteStream, await withCap(nuvP, NUV_WAIT_MS));
-      rememberResolved(ref, out.url);
-      log(`[resolve OK] vía YojaTV-server: ${remote.streams.length} copias, servidor ${remote.tookMs} ms, total ${Date.now() - startedAt} ms`);
-      return out;
-    }
-    // 2) Si el servidor no sirve (caído, lento o sin esa fuente), aquí se resuelve como siempre.
-    log('[server] sin resultado útil; se resuelve en el dispositivo');
-  }
-
-  // Nuvio ya lleva rato corriendo: se recoge (con tope) y se usa en los caminos de abajo.
-  const nuvStream = await withCap(nuvP, NUV_WAIT_MS);
-
+/** Todo el camino de resolución en el dispositivo. Devuelve el Stream final (ya etiquetado,
+ * recordado y sembrado en el servidor) o null si nada funcionó. Puede lanzar el error de Kino. */
+async function resolveLocal(ref, nuvP, startedAt) {
   if (ref.startsWith('mg:')) {
     let refs = [];
     try { refs = JSON.parse(decodeURIComponent(ref.slice(3))); } catch {}
@@ -4456,6 +4425,8 @@ async function resolve(params, options) {
     }
 
     if (!streams.length) {
+      // No hay nada todavía: aquí sí vale la pena esperar a Nuvio (tope de 3,5 s) antes de rendirse.
+      const nuvStream = await withCap(nuvP, NUV_WAIT_MS);
       if (nuvStream) {
         log('[resolve OK] merged resuelto solo con Nuvio local');
         rememberResolved(ref, nuvStream.url);
@@ -4511,7 +4482,8 @@ async function resolve(params, options) {
     };
     rememberResolved(ref, merged.url);
     serverSeed(primary.ref || ref, { url: merged.url, headers: primary.headers || null, label: primary.label || null });
-    return withNuvAlternative(merged, nuvStream);
+    // Nuvio como copia extra: solo si ya está listo, nunca retrasa la reproducción.
+    return withNuvAlternative(merged, await withCap(nuvP, NUV_ALT_WAIT_MS));
   }
 
   const sid = ref.includes(':') ? ref.split(':')[0] : (SOURCES[ref] ? ref : 'sl');
@@ -4521,6 +4493,7 @@ async function resolve(params, options) {
   }
   const stream = await resolveOneRef(ref);
   if (!stream) {
+    const nuvStream = await withCap(nuvP, NUV_WAIT_MS);
     if (nuvStream) {
       log(`[resolve OK] solo Nuvio local resolvió ${ref}`);
       rememberResolved(ref, nuvStream.url);
@@ -4533,7 +4506,79 @@ async function resolve(params, options) {
   const labeled = labelStream(stream, SOURCES[sid].label || sid);
   rememberResolved(ref, labeled.url);
   serverSeed(ref, labeled);
-  return withNuvAlternative(labeled, nuvStream);
+  return withNuvAlternative(labeled, await withCap(nuvP, NUV_ALT_WAIT_MS));
+}
+
+/**
+ * Resolve: el servidor y el dispositivo corren EN PARALELO y gana el primero que tenga un enlace
+ * usable. Antes era secuencial (esperar al servidor y solo después resolver aquí), y un título
+ * frío sumaba 12 s del servidor + 10-15 s del dispositivo: 30 s de espera. El que pierde sigue en
+ * segundo plano y calienta su caché para la próxima vez.
+ */
+async function resolve(params, options) {
+  const startedAt = Date.now();
+  await kino.sleep(0);
+  fetchBudgetReset();
+  let ref = '';
+  if (typeof params === 'string') ref = params;
+  else if (params && typeof params.ref === 'string') ref = params.ref;
+  log(`[resolve] resolving stream for ref: "${ref}"`);
+  if (!ref) {
+    log('[resolve ERROR] missing ref');
+    throw kino.error('not_found', 'Referencia no especificada');
+  }
+
+  const retry = options && options.retry && typeof options.retry === 'object' ? options.retry : null;
+  const candidates = ref.startsWith('mg:') ? decodeMgRefs(ref) : [ref];
+  // Nuvio se lanza también aquí: solo el dispositivo puede resolverlo (kino.nuvio vive en la app).
+  const nuvP = resolveNuvLocal(firstNuvRef(candidates));
+
+  // 1) Servidor: caché + lista ordenada con calidad ("1080p: FuegoCine"). Nunca lanza.
+  const serverP = (async () => {
+    if (!candidates.length) return null;
+    try {
+      const remote = await serverResolve(candidates, {
+        ...(retry ? { retry: { reason: retry.reason || null, attempt: retry.attempt || null, status: retry.status || null } } : {})
+      });
+      const stream = streamFromServer(remote);
+      if (!stream || !stream.url) {
+        log('[server] sin resultado útil; el camino del dispositivo sigue corriendo');
+        return null;
+      }
+      return { via: 'server', remote, stream };
+    } catch { return null; }
+  })();
+
+  // 2) Dispositivo: el mismo camino de siempre, lanzado a la vez. Sus errores se guardan para
+  // re-landarlos si tampoco el servidor pudo.
+  const localP = (async () => {
+    const stream = await resolveLocal(ref, nuvP, startedAt);
+    return stream ? { via: 'local', stream } : null;
+  })();
+
+  const tag = (p, via) => p.then((v) => ({ v, via }), (e) => ({ v: null, error: e || null, via }));
+  const sTag = tag(serverP, 'server');
+  const lTag = tag(localP, 'local');
+
+  let first = await Promise.race([sTag, lTag]);
+  if (!first.v) {
+    // El primero no sirvió: se espera al otro y se conserva su error por si tampoco pudo.
+    const other = await (first.via === 'server' ? lTag : sTag);
+    if (other.v || (!first.error && other.error)) first = other;
+  }
+  if (first.v && first.v.stream) {
+    const out = first.v.stream;
+    if (first.v.via === 'server') {
+      rememberResolved(ref, out.url);
+      log(`[resolve OK] vía YojaTV-server: ${first.v.remote.streams.length} copias, servidor ${first.v.remote.tookMs} ms, total ${Date.now() - startedAt} ms`);
+    } else {
+      log(`[resolve OK] resuelto en el dispositivo en ${Date.now() - startedAt} ms`);
+    }
+    return out;
+  }
+  if (first.error) throw first.error;
+  log('[resolve ERROR] ni el servidor ni el dispositivo resolvieron el ref');
+  throw kino.error('unavailable', 'No se encontró un servidor de reproducción', { userMessage: 'Este título no se ha encontrado en YojaTV' });
 }
 
 /* ---------- panel de reproducción (apiVersion 9) ---------- */
